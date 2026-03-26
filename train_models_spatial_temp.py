@@ -376,7 +376,7 @@ class MetricsCalculator:
 # ==================== WandB配置 ====================
 def wandb_config(model_name, num_heads, hidden_size, batch_size, attn_version):
     wandb.login()
-    wandb.init(project=f"afba_{model_name}_hardneg", entity="15145202826-1")
+    wandb.init(project=f"afba_{model_name}_hardneg", entity="----------")#entity需要使用自己的账号
     wandb.run.name = (f'nh_{num_heads}_hs_{hidden_size}_bs_{batch_size}_'
                       f'attn_{attn_version}_seed_{SEED}_scheduler_{scheduler_type}')
     wandb.config = {
