@@ -123,7 +123,7 @@ SwinConvLSTM为本项目实验得到的最佳模型。
 
 ### 预测可视化
 
-    python visualize_prediction.py --model_path saved_models/model.pth --data_path test_data.npy
+    python visualize_prediction.py --model_path saved_models/model.pth --data_path test_data
 
 ## 实验配置
 
