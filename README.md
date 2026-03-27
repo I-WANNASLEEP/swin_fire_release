@@ -56,7 +56,10 @@ SwinConvLSTM为本项目实验得到的最佳模型。
     │   ├── attentionunet.py         # AttentionUNet
     │   └── swinunetr/               # SwinUNETR实现
     ├── saved_models/                # 保存的模型文件
+    ├──environment.yaml              # 带构建号的环境文件
+    ├──environment_less.yaml         # 简化后的环境文件
     └── README.md                    # 项目说明文档
+    
 
 ## 环境要求
 
