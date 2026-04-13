@@ -189,8 +189,6 @@ SwinConvLSTM为本项目实验得到的最佳模型。
 
 ## 注意事项
 
-1. 数据预处理：确保输入数据已经过适当的归一化处理
-2. GPU内存：根据GPU内存大小调整批次大小和图像尺寸
-3. WandB配置：首次使用需要配置WandB账号和项目名称
-4. 预训练权重：建议使用ImageNet预训练的Swin Transformer权重初始化
+1. WandB配置：首次使用需要配置WandB账号和项目名称
+2. 预训练权重：建议使用ImageNet预训练的Swin Transformer权重初始化
 

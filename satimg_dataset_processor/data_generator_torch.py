@@ -30,15 +30,7 @@ class Normalize:
 
 
 class FireDataset(Dataset):
-    """
-    TS-SatFire 数据集（增强版）
-    
-    改进点：
-    1. 🔥 Fire-Aware Crop: 强制裁剪包含火灾的区域，防止正样本丢失。
-    2. 📡 Sensor Dropout: 模拟波段丢失和云层遮挡（时间步丢失）。
-    3. 🔄 Geometric: 保持时序一致性的翻转和旋转。
-    4. Intensity: 更安全的亮度/对比度调整。
-    """
+   
     def __init__(
         self, 
         image_path, 
@@ -179,7 +171,6 @@ class FireDataset(Dataset):
 
     def _smart_crop(self, image, label, crop_size):
         """
-        🔥 核心改进：感知火灾的裁剪
         如果图像中有火，以高概率（如80%）强制裁剪包含火灾的区域。
         """
         _, _, H, W = image.shape
