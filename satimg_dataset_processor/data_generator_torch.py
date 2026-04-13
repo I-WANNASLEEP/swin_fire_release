@@ -6,7 +6,7 @@ import torch.nn.functional as F
 class Normalize:
     """
     归一化变换类
-    对输入图像按通道进行 Z-score 标准化
+    对输入图像按通道进行标准化
     """
     def __init__(self, mean, std):
         """
