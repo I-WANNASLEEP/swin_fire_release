@@ -103,15 +103,35 @@ def main() -> None:
     model = config["model"]
     loss = config["loss"]
     training = config["training"]
+    wandb_settings = training.get("wandb", {})
+    wandb_mode = wandb_settings.get("mode", training.get("wandb_mode", "disabled"))
+    wandb_project = wandb_settings.get("project", "ts_satfire_jei_resubmission")
+    wandb_entity = wandb_settings.get("entity")
+    require_wandb_final_metrics = bool(wandb_settings.get(
+        "required_for_final_metrics", training.get("require_wandb_final_metrics", False)
+    ))
+    if require_wandb_final_metrics and wandb_mode != "online":
+        raise ValueError(
+            "Final reported metrics require training.wandb.mode: online; "
+            "offline or disabled runs are not admissible."
+        )
     data_root = configured_path(data.get("preprocessed_root", ""), "data.preprocessed_root")
     pretrained = configured_path(model.get("pretrained_weights", ""), "model.pretrained_weights")
     run_dir = PROJECT_ROOT / experiment["output_root"] / f"seed_{args.seed}"
     run_dir.mkdir(parents=True, exist_ok=False)
     manifest = {
         "config": str(config_path), "config_sha256": sha256(config_path), "seed": args.seed,
-        "data_root": str(data_root), "pretrained_weights": str(pretrained), **validation,
+        "data_root": str(data_root), "pretrained_weights": str(pretrained),
+        "wandb": {
+            "mode": wandb_mode,
+            "project": wandb_project,
+            "entity": wandb_entity,
+            "required_for_final_metrics": require_wandb_final_metrics,
+        },
+        **validation,
     }
-    (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    run_manifest_path = run_dir / "run_manifest.json"
+    run_manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     # Legacy seed convention is run + 41.  The run index therefore remains
     # explicit and is recorded alongside the requested seed.
     run_index = args.seed - 41
@@ -126,10 +146,15 @@ def main() -> None:
         "-patience", str(training["patience"]), "-grad_clip", str(training["grad_clip"]),
         "-scheduler", training["scheduler"], "--data-root", str(data_root),
         "--pretrained-path", str(pretrained), "--output-dir", str(run_dir),
-        "--wandb-mode", training.get("wandb_mode", "disabled"),
+        "--wandb-mode", wandb_mode, "--wandb-project", str(wandb_project),
+        "--run-manifest", str(run_manifest_path),
         "--loss-type", loss["name"], "-tversky_alpha", str(loss.get("alpha", 0.5)),
         "-tversky_beta", str(loss.get("beta", 0.5)), "-focal_gamma", str(loss.get("gamma", 3.0)),
     ]
+    if wandb_entity:
+        command.extend(["--wandb-entity", str(wandb_entity)])
+    if require_wandb_final_metrics:
+        command.append("--wandb-require-final-metrics")
     (run_dir / "command.json").write_text(json.dumps(command, indent=2) + "\n", encoding="utf-8")
     subprocess.run(command, check=True, cwd=PROJECT_ROOT)
 

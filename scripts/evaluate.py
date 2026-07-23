@@ -14,6 +14,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -76,6 +77,75 @@ def masked_metrics(probability: np.ndarray, target: np.ndarray, threshold: float
     }
 
 
+def load_wandb_run_details(args: argparse.Namespace) -> dict[str, Any]:
+    """Resolve the exact training run that must own this evaluation record."""
+    details: dict[str, Any] = {}
+    if args.wandb_run_file:
+        if not args.wandb_run_file.is_file():
+            raise FileNotFoundError(f"W&B run record does not exist: {args.wandb_run_file}")
+        details = json.loads(args.wandb_run_file.read_text(encoding="utf-8"))
+    run_id = args.wandb_run_id or details.get("run_id")
+    project = args.wandb_project or details.get("project")
+    entity = args.wandb_entity if args.wandb_entity is not None else details.get("entity")
+    if not run_id:
+        raise ValueError("A final evaluation requires --wandb-run-id or --wandb-run-file from training.")
+    if not project:
+        raise ValueError("A final evaluation requires --wandb-project or a project in --wandb-run-file.")
+    return {"run_id": run_id, "project": project, "entity": entity}
+
+
+def log_final_record_to_wandb(record: dict[str, Any], args: argparse.Namespace) -> dict[str, str]:
+    """Log a final per-event record and flush it before local publication artifacts exist."""
+    if args.wandb_mode == "disabled":
+        if args.require_wandb:
+            raise ValueError("--require-wandb requires --wandb-mode online.")
+        return {}
+    if args.require_wandb and args.wandb_mode != "online":
+        raise ValueError("Final reported metrics must use online W&B tracking, not offline mode.")
+    try:
+        import wandb
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("W&B is required for this evaluation but is not installed.") from exc
+
+    details = load_wandb_run_details(args)
+    if args.wandb_mode == "online":
+        wandb.login()
+    run = wandb.init(
+        project=details["project"],
+        entity=details["entity"],
+        id=details["run_id"],
+        resume="must" if args.wandb_mode == "online" else None,
+        mode=args.wandb_mode,
+        job_type="final_evaluation",
+    )
+    payload = {
+        "final_metrics/record_type": "per_event",
+        "final_metrics/event_id": record["event_id"],
+        "final_metrics/split": record["split"],
+        "final_metrics/seed": record["seed"],
+        "final_metrics/threshold": record["threshold"],
+        "final_metrics/f1": record["f1"],
+        "final_metrics/iou": record["iou"],
+        "final_metrics/precision": record["precision"],
+        "final_metrics/recall": record["recall"],
+        "final_metrics/valid_pixels": record["valid_pixels"],
+        "final_metrics/true_positive": record["true_positive"],
+        "final_metrics/false_positive": record["false_positive"],
+        "final_metrics/false_negative": record["false_negative"],
+        "final_metrics/true_negative": record["true_negative"],
+        "provenance/checkpoint_sha256": record["checkpoint_sha256"],
+        "provenance/dataset_sha256": record["dataset_sha256"],
+        "provenance/sample_manifest_sha256": record["sample_manifest_sha256"],
+        "provenance/prediction_sha256": record["prediction_sha256"],
+        "provenance/target_sha256": record["target_sha256"],
+    }
+    try:
+        wandb.log(payload)
+    finally:
+        wandb.finish()
+    return {"wandb_run_id": run.id, "wandb_run_url": run.url, "wandb_project": details["project"]}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prediction", type=Path, required=True)
@@ -91,6 +161,14 @@ def main() -> None:
     parser.add_argument("--dataset-sha256", required=True)
     parser.add_argument("--sample-manifest-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="disabled")
+    parser.add_argument("--wandb-project", default=None)
+    parser.add_argument("--wandb-entity", default=None)
+    parser.add_argument("--wandb-run-id", default=None)
+    parser.add_argument("--wandb-run-file", type=Path, default=None,
+                        help="wandb_run.json emitted by the matching training seed.")
+    parser.add_argument("--require-wandb", action="store_true",
+                        help="Reject local-only final metrics; online W&B logging is mandatory.")
     args = parser.parse_args()
 
     split_file = PROJECT_ROOT / "splits" / f"{args.split}_event_ids.txt"
@@ -114,6 +192,7 @@ def main() -> None:
         "sample_manifest_sha256": args.sample_manifest_sha256,
         **masked_metrics(probability, target, args.threshold),
     }
+    record.update(log_final_record_to_wandb(record, args))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"Wrote raw metrics: {args.output}")

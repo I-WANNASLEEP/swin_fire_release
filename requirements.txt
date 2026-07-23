@@ -10,4 +10,4 @@ scikit-learn==1.5.2
 matplotlib==3.9.2
 seaborn==0.13.2
 PyYAML==6.0.2
-wandb==0.24.1
+wandb==0.28.1

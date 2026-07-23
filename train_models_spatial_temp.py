@@ -187,6 +187,10 @@ parser.add_argument('--output-dir', type=str, default='results/training_runs/leg
 parser.add_argument('--wandb-mode', choices=('online', 'offline', 'disabled'), default='disabled', help='WandB execution mode')
 parser.add_argument('--wandb-project', default='ts_satfire_reproducible', help='WandB project name')
 parser.add_argument('--wandb-entity', default=None, help='Optional WandB entity; never hard-code a personal account')
+parser.add_argument('--wandb-require-final-metrics', action='store_true',
+                    help='Reject non-online tracking: final paper metrics must have a remote W&B record.')
+parser.add_argument('--run-manifest', type=str, default=None,
+                    help='Immutable launcher manifest recorded in the W&B run metadata.')
 
 args = parser.parse_args()
 
@@ -224,13 +228,18 @@ torch.backends.cudnn.benchmark = True
 
 if not args.data_root:
     parser.error('--data-root or TS_SATFIRE_DATA_ROOT is required; source edits are not supported.')
+if args.wandb_require_final_metrics and args.wandb_mode != 'online':
+    parser.error('--wandb-require-final-metrics requires --wandb-mode online.')
 root_path = os.path.abspath(os.path.expanduser(args.data_root))
 output_dir = Path(args.output_dir).expanduser().resolve()
 checkpoint_dir = output_dir / 'checkpoints'
 confusion_matrix_dir = output_dir / 'confusion_matrices'
 epoch_metrics_path = output_dir / 'epoch_metrics.jsonl'
+wandb_run_record_path = output_dir / 'wandb_run.json'
 checkpoint_dir.mkdir(parents=True, exist_ok=True)
 confusion_matrix_dir.mkdir(parents=True, exist_ok=True)
+if args.run_manifest and not Path(args.run_manifest).expanduser().is_file():
+    parser.error(f'--run-manifest does not exist: {args.run_manifest}')
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
 
@@ -366,15 +375,7 @@ def wandb_config(model_name, num_heads, hidden_size, batch_size, attn_version):
         )
     if args.wandb_mode == 'online':
         wandb.login()
-    wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity,
-        mode=args.wandb_mode,
-        dir=str(output_dir),
-    )
-    wandb.run.name = (f'nh_{num_heads}_hs_{hidden_size}_bs_{batch_size}_'
-                      f'attn_{attn_version}_seed_{SEED}_scheduler_{scheduler_type}')
-    wandb.config = {
+    config_payload = {
         "learning_rate": lr,
         "weight_decay": weight_decay,
         "epochs": MAX_EPOCHS,
@@ -383,9 +384,54 @@ def wandb_config(model_name, num_heads, hidden_size, batch_size, attn_version):
         "grad_clip": grad_clip_max_norm,
         "scheduler": scheduler_type,
         "attention_version": attn_version,
+        "model": model_name,
+        "input_channels": n_channel,
+        "seed": SEED,
+        "loss_type": args.loss_type,
+        "tversky_alpha": tversky_alpha,
+        "tversky_beta": tversky_beta,
+        "focal_gamma": focal_gamma,
+        "final_metrics_must_be_online": args.wandb_require_final_metrics,
     }
+    if args.run_manifest:
+        config_payload["run_manifest_path"] = str(Path(args.run_manifest).expanduser().resolve())
+    run = wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        mode=args.wandb_mode,
+        dir=str(output_dir),
+        job_type="training",
+        config=config_payload,
+    )
+    run.name = (f'nh_{num_heads}_hs_{hidden_size}_bs_{batch_size}_'
+                f'attn_{attn_version}_seed_{SEED}_scheduler_{scheduler_type}')
     wandb.define_metric("epoch")
     wandb.define_metric("val_f1_score", step_metric="epoch", summary="max")
+    wandb.define_metric("validation/f1_at_selected_threshold", step_metric="epoch", summary="max")
+    wandb.define_metric("validation/iou_at_selected_threshold", step_metric="epoch", summary="max")
+    if args.wandb_mode == 'online':
+        run_record = {
+            "run_id": run.id,
+            "url": run.url,
+            "project": args.wandb_project,
+            "entity": args.wandb_entity,
+            "seed": SEED,
+            "mode": args.wandb_mode,
+            "final_metrics_must_be_online": args.wandb_require_final_metrics,
+        }
+        wandb_run_record_path.write_text(
+            json.dumps(run_record, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+        )
+
+
+def wandb_log_or_fail(payload, context):
+    """Do not allow a reportable run to silently lose its remote metric record."""
+    try:
+        wandb.log(payload)
+    except Exception as exc:
+        if args.wandb_require_final_metrics:
+            raise RuntimeError(f'Mandatory W&B logging failed during {context}.') from exc
+        print(f"- WandB logging failed during {context}: {exc}")
 
 # ==================== 数据加载 ====================
 if mode != 'af':
@@ -1091,6 +1137,14 @@ for epoch in range(MAX_EPOCHS):
         'val_best_recall': custom_metrics['best_recall'],
         'val_best_iou': custom_metrics['best_iou'],
         'global_best_f1': early_stopping.best_f1,
+        # These names are the validation-selected quantities that later define
+        # the frozen test protocol.  They are intentionally distinct from the
+        # current-threshold diagnostics above.
+        'validation/selected_threshold': custom_metrics['best_threshold'],
+        'validation/f1_at_selected_threshold': custom_metrics['best_f1'],
+        'validation/iou_at_selected_threshold': custom_metrics['best_iou'],
+        'validation/precision_at_selected_threshold': custom_metrics['best_precision'],
+        'validation/recall_at_selected_threshold': custom_metrics['best_recall'],
     }
 
     # Persist every epoch locally before optional remote tracking.  This JSONL
@@ -1118,10 +1172,7 @@ for epoch in range(MAX_EPOCHS):
         else:
             scheduler.step()
     
-    try:
-        wandb.log(log_dict)
-    except Exception as e:
-        print(f"- WandB logging failed: {e}")
+    wandb_log_or_fail(log_dict, f'training epoch {epoch + 1}')
     
     # Cosine Scheduler 已在 train_one_epoch 中按 batch 更新
     # 打印当前学习率
@@ -1138,7 +1189,8 @@ for epoch in range(MAX_EPOCHS):
             cm_path, 
             title=f'Confusion Matrix - Epoch {epoch + 1}'
         )
-        wandb.log({f'confusion_matrix_epoch_{epoch + 1}': wandb.Image(cm_path)})
+        wandb_log_or_fail({f'confusion_matrix_epoch_{epoch + 1}': wandb.Image(cm_path)},
+                          f'confusion matrix at epoch {epoch + 1}')
     
     # 保存最佳检查点（基于 F1 score，只保存一个最佳模型）
     current_f1 = custom_metrics['f1_score']
@@ -1186,6 +1238,17 @@ for epoch in range(MAX_EPOCHS):
             'f1_score': current_f1,
         }, best_model_path)
 
+        checkpoint_record = {
+            'selection/best_epoch': epoch + 1,
+            'selection/best_validation_f1': current_f1,
+            'selection/frozen_threshold': custom_metrics['best_threshold'],
+            'selection/best_validation_iou': custom_metrics['best_iou'],
+            'selection/best_validation_precision': custom_metrics['best_precision'],
+            'selection/best_validation_recall': custom_metrics['best_recall'],
+            'selection/checkpoint_path': best_model_path,
+        }
+        wandb_log_or_fail(checkpoint_record, f'checkpoint selection at epoch {epoch + 1}')
+
         print(f"  - Saved best model: {best_model_path}")
         print(f"  - F1 Score: {current_f1:.4f}, Best Threshold: {best_threshold:.2f}")
     
@@ -1201,4 +1264,9 @@ if best_model_path:
     print(f"\nBest model saved at: {best_model_path}")
     print(f"Best F1 Score: {best_f1:.4f}")
 
-wandb.finish()
+try:
+    wandb.finish()
+except Exception as exc:
+    if args.wandb_require_final_metrics:
+        raise RuntimeError('Mandatory W&B run finalization failed.') from exc
+    print(f"- WandB finalization failed: {exc}")

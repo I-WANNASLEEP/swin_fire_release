@@ -531,5 +531,5 @@ dependencies:
       - typer-slim==0.23.1
       - typing-extensions==4.15.0
       - typing-inspection==0.4.2
-      - wandb==0.24.1
+      - wandb==0.28.1
 prefix: /home/congwei/miniconda3/envs/ts-satfire-fixed

@@ -46,4 +46,8 @@ training:
   patience: 15
   grad_clip: 1.0
   scheduler: cosine_restart_decay
-  wandb_mode: disabled
+  wandb:
+    mode: online
+    project: ts_satfire_jei_resubmission
+    entity: null  # Uses the authenticated W&B account; never commit a personal entity.
+    required_for_final_metrics: true
