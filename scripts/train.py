@@ -12,6 +12,8 @@ import argparse
 import csv
 import hashlib
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +25,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets.splits import assert_disjoint, load_event_ids  # noqa: E402
 
+_ENV_PATTERN = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+
+
+def _resolve_env(value: str) -> str:
+    def _replace(match: re.Match) -> str:
+        name = match.group(1) or match.group(2)
+        return os.environ.get(name, match.group(0))
+    return _ENV_PATTERN.sub(_replace, value)
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -33,6 +44,7 @@ def sha256(path: Path) -> str:
 
 
 def configured_path(value: str, field: str) -> Path:
+    value = _resolve_env(value)
     if not value or value.startswith("path/to/"):
         raise ValueError(f"Set a real path for config field {field!r}; placeholders cannot launch a run.")
     return Path(value).expanduser().resolve()
@@ -65,7 +77,7 @@ def validate(config: dict) -> dict[str, object]:
             raise ValueError(f"Sample manifest misses required columns: {sorted(missing)}")
         rows = list(reader)
     declared = {event_id for ids in loaded.values() for event_id in ids}
-    unknown = sorted({row["event_id"] for row in rows} - declared)
+    unknown = sorted({row["event_id"] for row in rows if not row["event_id"].endswith("_aggregate")} - declared)
     if unknown:
         raise ValueError(f"Sample manifest contains events outside the locked split: {unknown[:5]}")
     if not rows:
@@ -84,12 +96,36 @@ def main() -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--check", action="store_true", help="Validate only; do not create a run or start training.")
     parser.add_argument("--execute", action="store_true", help="Start the legacy model loop after preflight succeeds.")
+    parser.add_argument("--override-attention", default=None, help="Override model.attention in config.")
+    parser.add_argument("--override-scheduler", default=None, help="Override training.scheduler in config.")
+    parser.add_argument("--override-loss-type", default=None, help="Override loss.name in config.")
+    parser.add_argument("--override-pretrained", default=None, help="Override model.pretrained_weights in config.")
+    parser.add_argument("--override-output-root", default=None, help="Override experiment.output_root in config.")
+    parser.add_argument("--override-tversky-alpha", type=float, default=None, help="Override loss.alpha in config.")
+    parser.add_argument("--override-tversky-beta", type=float, default=None, help="Override loss.beta in config.")
+    parser.add_argument("--no-copy-paste", action="store_true", help="Disable copy-paste augmentation (for Model B/C/D).")
     args = parser.parse_args()
     if args.check == args.execute:
         parser.error("Choose exactly one of --check or --execute.")
 
     config_path = args.config.expanduser().resolve()
     config = load_config(config_path)
+
+    if args.override_attention is not None:
+        config.setdefault("model", {})["attention"] = args.override_attention
+    if args.override_scheduler is not None:
+        config.setdefault("training", {})["scheduler"] = args.override_scheduler
+    if args.override_loss_type is not None:
+        config.setdefault("loss", {})["name"] = args.override_loss_type
+    if args.override_pretrained is not None:
+        config.setdefault("model", {})["pretrained_weights"] = args.override_pretrained
+    if args.override_output_root is not None:
+        config.setdefault("experiment", {})["output_root"] = args.override_output_root
+    if args.override_tversky_alpha is not None:
+        config.setdefault("loss", {})["alpha"] = args.override_tversky_alpha
+    if args.override_tversky_beta is not None:
+        config.setdefault("loss", {})["beta"] = args.override_tversky_beta
+
     experiment = config.get("experiment", {})
     seeds = experiment.get("seeds", [])
     if args.seed not in seeds:
@@ -105,7 +141,7 @@ def main() -> None:
     training = config["training"]
     wandb_settings = training.get("wandb", {})
     wandb_mode = wandb_settings.get("mode", training.get("wandb_mode", "disabled"))
-    wandb_project = wandb_settings.get("project", "ts_satfire_jei_resubmission")
+    wandb_project = wandb_settings.get("project", "swinfire_jei_resubmission_v2")
     wandb_entity = wandb_settings.get("entity")
     require_wandb_final_metrics = bool(wandb_settings.get(
         "required_for_final_metrics", training.get("require_wandb_final_metrics", False)
@@ -116,7 +152,11 @@ def main() -> None:
             "offline or disabled runs are not admissible."
         )
     data_root = configured_path(data.get("preprocessed_root", ""), "data.preprocessed_root")
-    pretrained = configured_path(model.get("pretrained_weights", ""), "model.pretrained_weights")
+    pretrained_raw = model.get("pretrained_weights", "")
+    if pretrained_raw and pretrained_raw.lower() not in ("none", "null", ""):
+        pretrained = configured_path(pretrained_raw, "model.pretrained_weights")
+    else:
+        pretrained = Path("")  # Sentinel for random initialization
     run_dir = PROJECT_ROOT / experiment["output_root"] / f"seed_{args.seed}"
     run_dir.mkdir(parents=True, exist_ok=False)
     manifest = {
@@ -145,12 +185,18 @@ def main() -> None:
         "-it", str(training["interval"]), "--max-epochs", str(training["max_epochs"]),
         "-patience", str(training["patience"]), "-grad_clip", str(training["grad_clip"]),
         "-scheduler", training["scheduler"], "--data-root", str(data_root),
-        "--pretrained-path", str(pretrained), "--output-dir", str(run_dir),
+        "--output-dir", str(run_dir),
         "--wandb-mode", wandb_mode, "--wandb-project", str(wandb_project),
         "--run-manifest", str(run_manifest_path),
         "--loss-type", loss["name"], "-tversky_alpha", str(loss.get("alpha", 0.5)),
         "-tversky_beta", str(loss.get("beta", 0.5)), "-focal_gamma", str(loss.get("gamma", 3.0)),
     ]
+    if pretrained != Path(""):
+        command.extend(["--pretrained-path", str(pretrained)])
+    else:
+        command.extend(["--pretrained-path", ""])
+    if args.no_copy_paste:
+        command.append("--no-copy-paste")
     if wandb_entity:
         command.extend(["--wandb-entity", str(wandb_entity)])
     if require_wandb_final_metrics:

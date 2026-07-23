@@ -174,7 +174,7 @@ def main() -> None:
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--bootstrap-seed", type=int, default=20260723)
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="disabled")
-    parser.add_argument("--wandb-project", default="ts_satfire_jei_resubmission")
+    parser.add_argument("--wandb-project", default="swinfire_jei_resubmission_v2")
     parser.add_argument("--wandb-entity", default=None)
     parser.add_argument("--wandb-report-name", default="final-test-summary")
     parser.add_argument("--require-wandb", action="store_true",

@@ -1,0 +1,13 @@
+data/
+*.npy
+*.pth
+*.pt
+__pycache__/
+*.pyc
+wandb/
+.ipynb_checkpoints/
+.DS_Store
+results/
+.env
+swin_fire_release-main.zip
+plan.md

@@ -13,8 +13,8 @@ data:
     channel_order: metadata/channel_order.json
     normalization: metadata/normalization_statistics.json
     preprocessing: metadata/preprocessing_config.yaml
-  required_sample_manifest: path/to/generated_sample_manifest.csv
-  preprocessed_root: path/to/preprocessed_active_fire_arrays
+  required_sample_manifest: ${SAMPLE_MANIFEST}
+  preprocessed_root: ${TS_SATFIRE_DATA_ROOT}
 model:
   name: swin_convlstm
   input_channels: 8
@@ -22,7 +22,7 @@ model:
   feature_size: 96
   hidden_dim: 64
   attention: dcbam
-  pretrained_weights: path/to/swin_tiny_patch4_window7_224.pth
+  pretrained_weights: ${SWIN_PRETRAINED_PATH}
 loss:
   name: masked_hybrid
   tversky_weight: 0.4
@@ -48,6 +48,6 @@ training:
   scheduler: cosine_restart_decay
   wandb:
     mode: online
-    project: ts_satfire_jei_resubmission
+    project: swinfire_jei_resubmission_v2
     entity: null  # Uses the authenticated W&B account; never commit a personal entity.
     required_for_final_metrics: true

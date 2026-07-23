@@ -26,45 +26,56 @@ the corrected experiment**. No revised metric is pre-filled in this repository.
 
 ## Environment: use the existing Conda environment
 
-Do not download or recreate an environment. Use the existing `ts-satfire`
+Do not download or recreate an environment. Use the existing `ts-satfire-fixed`
 environment already on this computer:
 
 ```bash
-PROJECT=/Users/congwei/Documents/遥感火灾论文/swin_fire_released
-PY=/opt/miniconda3/envs/ts-satfire/bin/python
-cd "$PROJECT"
-"$PY" -m unittest losses.test_masked_hybrid_loss
-"$PY" scripts/materialize_splits.py --check
+PYTHON=/home/congwei/miniconda3/envs/ts-satfire-fixed/bin/python
+cd /home/congwei/swin_fire_new
+
+# Set up environment variables (required before training)
+cp .env.example .env
+# Edit .env with your actual data paths, then:
+source .env
+
+# Verify loss correctness
+"$PYTHON" -m unittest losses.test_masked_hybrid_loss
+"$PYTHON" scripts/materialize_splits.py --check
 ```
 
 `requirements.txt` is a reference compatibility target, not an instruction to
 install packages. The revised code makes optional logging/debug/plot packages
 non-blocking when the existing environment lacks them.
 
-## Reproduce a corrected experiment
+## Quick Start: Full Ablation Experiment Pipeline
 
-The original data and pretrained checkpoint are intentionally not copied into
-this repository. Before training, set the `path/to/...` values in
-`configs/full_model.yaml` to your local preprocessed array root, event-window
-manifest, and pretrained Swin checkpoint. The window manifest must include
-`event_id,split`; do not evaluate aggregate arrays that cannot be traced to an
-event.
+Before running, set the required environment variables (see `.env.example`).
 
+### Step 1: Validate setup (no training)
 ```bash
-"$PY" scripts/train.py --config configs/full_model.yaml --seed 41 --check
-
-for seed in 41 42 43 44 45; do
-  "$PY" scripts/train.py --config configs/full_model.yaml --seed "$seed" --execute
-done
+"$PYTHON" -m unittest losses.test_masked_hybrid_loss
+"$PYTHON" scripts/materialize_splits.py --check
+"$PYTHON" scripts/train.py --config configs/full_model.yaml --seed 41 --check
 ```
 
-Choose the Tversky `(alpha, beta)` grid and segmentation threshold on validation
-events only. Then freeze them and run `scripts/evaluate.py` for every held-out
-test event. Generate manuscript assets only after all raw records are present:
-
+### Step 2: Tversky parameter selection (validation only)
 ```bash
-"$PY" scripts/reproduce_all_tables.py --input results/raw_metrics --output results
-"$PY" scripts/reproduce_training_curves.py --input results/training_runs --output results
+bash scripts/run_tversky_grid_search.sh
+```
+
+### Step 3: Run all ablation experiments
+```bash
+bash scripts/run_full_model.sh
+bash scripts/run_attention_ablation.sh
+bash scripts/run_progressive_ablation.sh
+bash scripts/run_architecture_baselines.sh
+bash scripts/run_initialization_ablation.sh
+```
+
+### Step 4: Generate paper tables and figures
+```bash
+"$PYTHON" scripts/reproduce_all_tables.py --input results/raw_metrics --output results
+"$PYTHON" scripts/reproduce_training_curves.py --input results/training_runs --output results
 ```
 
 The report generator rejects fewer than three independent seeds, reports

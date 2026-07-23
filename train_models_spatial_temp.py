@@ -181,11 +181,12 @@ parser.add_argument('-tversky_alpha', type=float, default=0.5, help='Tversky fal
 parser.add_argument('-tversky_beta', type=float, default=0.5, help='Tversky false-negative weight; select on validation only')
 parser.add_argument('-focal_gamma', type=float, default=3.0, help='Masked focal-loss gamma')
 parser.add_argument('--loss-type', choices=('masked_hybrid', 'masked_cross_entropy'), default='masked_hybrid', help='Loss for a controlled ablation')
+parser.add_argument('--no-copy-paste', action='store_true', help='Disable copy-paste augmentation for Model B/C/D ablations')
 parser.add_argument('--data-root', type=str, default=os.environ.get('TS_SATFIRE_DATA_ROOT'), help='Directory containing dataset_train and dataset_val')
 parser.add_argument('--pretrained-path', type=str, default=os.environ.get('SWIN_PRETRAINED_PATH'), help='Optional Swin pretrained checkpoint')
 parser.add_argument('--output-dir', type=str, default='results/training_runs/legacy', help='Directory for checkpoints and diagnostic artifacts')
 parser.add_argument('--wandb-mode', choices=('online', 'offline', 'disabled'), default='disabled', help='WandB execution mode')
-parser.add_argument('--wandb-project', default='ts_satfire_reproducible', help='WandB project name')
+parser.add_argument('--wandb-project', default='swinfire_jei_resubmission_v2', help='WandB project name')
 parser.add_argument('--wandb-entity', default=None, help='Optional WandB entity; never hard-code a personal account')
 parser.add_argument('--wandb-require-final-metrics', action='store_true',
                     help='Reject non-online tracking: final paper metrics must have a remote W&B record.')
@@ -673,7 +674,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
         
         train_bar.set_postfix({
             'loss': f'{current_loss:.4f}',
-            'lr': f'{lr_current:.6f}',
+            'lr': f'{lr_current:.2e}',
             'copy_paste': cp_prob_str
         })
 
@@ -913,6 +914,7 @@ train_dataset = FireDataset(
     label_sel=label_sel,
     is_train=True,
     crop_size=224,
+    enable_copy_paste=not args.no_copy_paste,
 )
 print(f"训练集样本数: {len(train_dataset)}")
 print(f"原始图像文件总样本数: {np.load(image_path, mmap_mode='r').shape[0]}")

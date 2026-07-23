@@ -44,6 +44,7 @@ class FireDataset(Dataset):
         dilation_range=(3, 9),
         dilation_grow_epochs=80,
         use_random_dilation=False,
+        enable_copy_paste=True,
     ):
         self.images = np.load(image_path, mmap_mode='r')
         self.labels = np.load(label_path, mmap_mode='r')
@@ -78,11 +79,15 @@ class FireDataset(Dataset):
         #     'fire_crop': 0.0,
         #     'copy_paste': 0.0
         # }
+        self.enable_copy_paste = enable_copy_paste
         self.current_epoch = 0
         
     def set_epoch(self, epoch):
         """设置当前epoch，更新Copy-Paste概率"""
         self.current_epoch = epoch
+        if not self.enable_copy_paste:
+            self.aug_probs['copy_paste'] = 0.0
+            return
         if epoch <= 40:
             self.aug_probs['copy_paste'] = 0.0
         elif epoch <= 60:

@@ -1,4 +1,4 @@
-name: swinfire
+name: swin-fire
 channels:
   - conda-forge
   - defaults
