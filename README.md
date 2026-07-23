@@ -1,194 +1,105 @@
-# 遥感图像火灾检测项目
+# Corrected-loss wildfire segmentation revision
 
-基于深度学习的遥感图像时空火灾检测系统，使用Swin Transformer和ConvLSTM进行时空特征建模。
+This repository is being rebuilt for a reproducible JEI resubmission. It keeps
+the SwinConvLSTM research direction and 8-channel TS-SatFire input, but treats
+all results produced with the former Hybrid Loss as **historical and invalid for
+the corrected experiment**. No revised metric is pre-filled in this repository.
 
-## 项目简介
+## What is fixed
 
-本项目实现了一个基于深度学习的遥感图像火灾检测模型，能够从多时相卫星图像中检测火灾区域。
+- `losses/masked_hybrid_loss.py` uses two-class Softmax, masks `-1` pixels
+  before every Tversky/Focal/CE reduction, and implements
+  `0.4 × Tversky + 0.3 × Focal + 0.3 × CE`.
+- `losses/test_masked_hybrid_loss.py` tests ignored-pixel invariance and zero
+  gradient, all-invalid crops, extreme foreground ratios, Softmax, CPU/GPU, and
+  AMP behavior.
+- `splits/` is a locked official active-fire event partition: 125 training,
+  13 validation, and 17 test events. It replaces all directory-order or
+  “first 10” selection.
+- `metadata/` pins the upstream code revision, channel order, normalization
+  provenance, preprocessing contract, and dataset-version requirements.
+- `scripts/evaluate.py` emits masked, per-event raw metric records;
+  `scripts/reproduce_all_tables.py` derives tables/figure data from those raw
+  records only. The trainer writes one local JSONL record per epoch, and
+  `scripts/reproduce_training_curves.py` derives convergence curves from those
+  logs only.
 
-SwinConvLSTM为本项目实验得到的最佳模型。
+## Environment: use the existing Conda environment
 
-主要特点包括：
+Do not download or recreate an environment. Use the existing `ts-satfire`
+environment already on this computer:
 
-- 时空建模：结合Swin Transformer的空间特征提取能力和ConvLSTM的时序建模能力
-- 多模型支持：提供UNet、AttentionUNet、SwinUNETR、UNETR和SwinConvLSTM等多种模型架构
-- 混合损失函数：采用Tversky Loss、Focal Loss和Cross Entropy Loss的组合损失函数
-- 实验跟踪：集成WandB进行训练过程监控和实验管理
+```bash
+PROJECT=/Users/congwei/Documents/遥感火灾论文/swin_fire_released
+PY=/opt/miniconda3/envs/ts-satfire/bin/python
+cd "$PROJECT"
+"$PY" -m unittest losses.test_masked_hybrid_loss
+"$PY" scripts/materialize_splits.py --check
+```
 
-## 主要功能
+`requirements.txt` is a reference compatibility target, not an instruction to
+install packages. The revised code makes optional logging/debug/plot packages
+non-blocking when the existing environment lacks them.
 
-### 数据处理
-- 支持多时相卫星图像序列输入
-- 自动数据增强和归一化处理
-- 灵活的训练/验证/测试数据集划分
+## Reproduce a corrected experiment
 
-### 模型架构
-- SwinConvLSTM：Swin Transformer + ConvLSTM的时空融合模型
-- SwinUNETR：3D Swin Transformer用于时空分割
-- UNet/AttentionUNet：经典的语义分割模型
-- UNETR：基于Transformer的编码器-解码器架构
+The original data and pretrained checkpoint are intentionally not copied into
+this repository. Before training, set the `path/to/...` values in
+`configs/full_model.yaml` to your local preprocessed array root, event-window
+manifest, and pretrained Swin checkpoint. The window manifest must include
+`event_id,split`; do not evaluate aggregate arrays that cannot be traced to an
+event.
 
-### 训练策略
-- 混合精度训练（AMP）
-- 余弦退火学习率调度
-- 梯度裁剪和早停机制
-- 多阈值评估和最优阈值搜索
+```bash
+"$PY" scripts/train.py --config configs/full_model.yaml --seed 41 --check
 
-### 评估指标
-- Precision、Recall、F1 Score
-- IoU（交并比）
-- Specificity、Sensitivity
-- 混淆矩阵可视化
+for seed in 41 42 43 44 45; do
+  "$PY" scripts/train.py --config configs/full_model.yaml --seed "$seed" --execute
+done
+```
 
-## 项目结构
+Choose the Tversky `(alpha, beta)` grid and segmentation threshold on validation
+events only. Then freeze them and run `scripts/evaluate.py` for every held-out
+test event. Generate manuscript assets only after all raw records are present:
 
-    swin_fire_released/
-    ├── dataset_generate.py          # 数据集生成脚本
-    ├── train_models_spatial_temp.py # 模型训练主脚本
-    ├── visualize_model.py           # 模型架构可视化
-    ├── visualize_prediction.py      # 预测结果可视化
-    ├── train_monitor.sh             # 训练监控脚本
-    ├── roi/                         # ROI数据
-    ├── satimg_dataset_processor/    # 卫星图像处理模块
-    ├── spatial_models/              # 模型定义目录
-    │   ├── swin_convlstm.py         # SwinConvLSTM模型
-    │   ├── unet.py                  # UNet模型
-    │   ├── attentionunet.py         # AttentionUNet
-    │   └── swinunetr/               # SwinUNETR实现
-    ├── saved_models/                # 保存的模型文件
-    ├──environment.yaml              # 带构建号的环境文件
-    ├──environment_less.yaml         # 简化后的环境文件
-    └── README.md                    # 项目说明文档
-    
+```bash
+"$PY" scripts/reproduce_all_tables.py --input results/raw_metrics --output results
+"$PY" scripts/reproduce_training_curves.py --input results/training_runs --output results
+```
 
-## 环境要求
+The report generator rejects fewer than three independent seeds, reports
+mean±standard deviation across seeds, and computes confidence intervals by
+bootstrapping held-out fire events—not epochs. Epoch logs are used only for
+convergence figures; they are never treated as independent experimental runs.
 
-参考environment.yaml和environment_less.yaml
+## Experiment scope
 
-## 使用方法
+`configs/full_model.yaml`, `configs/attention_ablation.yaml`,
+`configs/architecture_baselines.yaml`, and
+`configs/initialization_ablation.yaml` define the required controlled studies.
+`configs/progressive_ablation.yaml` states the exact Model A–D rerun contract.
+The attention comparison is `none`, `se`, `cbam`, and `dcbam`; all non-attention
+settings remain fixed. Every prior Hybrid-Loss result (Models A/B/C, attention
+ablations, and loss ablations) must be rerun. A CE-only Model D can only be
+retained with provenance, but rerunning under this code version is preferred.
 
-### 数据准备
+`dataset_generate.py` is explicitly `DEPRECATED_NOT_USED_IN_PAPER` because it
+selects a directory-derived first-ten test subset. Use the pinned upstream
+generator plus `scripts/materialize_splits.py` instead.
 
-准备卫星图像数据，按以下结构组织：
+## Cross-sensor airborne validation
 
-    data/
-    ├── dataset_train/      # 训练数据集
-    ├── dataset_val/        # 验证数据集
-    └── dataset_test/       # 测试数据集
+The old two-channel-with-six-zero-filled image demonstration is not a standalone
+cross-sensor experiment. Follow `docs/airborne_metadata.md`, create a manifest
+with independent held-out events and calibration/channel-adaptation information,
+and validate it with `scripts/evaluate_airborne.py`. Do not report an airborne
+metric until that protocol and its raw per-event records exist.
 
-### 生成数据集
-
-    python dataset_generate.py -mode train -ts 10 -it 3 -uc af
-    python dataset_generate.py -mode val -ts 10 -it 3 -uc af
-    python dataset_generate.py -mode test -ts 10 -it 3 -uc af
-
-参数说明：
-- -mode：数据集模式（train/val/test）
-- -ts：时间序列长度
-- -it：时间间隔
-- -uc：使用场景（af）
-
-### 训练模型
-
-    python train_models_spatial_temp.py \
-        -m swin_convlstm \
-        -mode af \
-        -b 1 \
-        -r 1 \
-        -lr 0.0001 \
-        -nh 4 \
-        -ed 96 \
-        -nc 8 \
-        -ts 10 \
-        -it 3 \
-        -epoch 100 \
-        -patience 15 \
-        -grad_clip 1.0 \
-        -scheduler cosine
-
-主要训练参数：
-- -m：模型名称（swin_convlstm/swinunetr3d/unet3d/attunet3d/unetr3d）
-- -mode：模式（使用af）
-- -b：批次大小
-- -lr：学习率
-- -nh：注意力头数
-- -ed：嵌入维度
-- -nc：输入通道数
-- -ts：时间序列长度
-- -it：时间间隔
-- -epoch：训练轮数
-- -patience：早停耐心值
-- -scheduler：学习率调度器类型
-
-### 模型可视化
-
-    python visualize_model.py --pth_path saved_models/model.pth --n_channel 8 --ts_length 5
-
-### 预测可视化
-
-    python visualize_prediction.py --model_path saved_models/model.pth --data_path test_data
-
-## 实验配置
-
-损失函数配置：
-
-    criterion = HybridLoss(
-        tversky_weight=0.4,
-        focal_weight=0.3,
-        ce_weight=0.3
-    )
-
-优化器配置：
-
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=0.0001,
-        weight_decay=0.00001,
-        betas=(0.9, 0.999)
-    )
-
-学习率调度器：
-- CosineAnnealingWarmRestartsWithDecay：带衰减的余弦退火重启
-- 支持周期性学习率调整和峰值衰减
-
-## 自定义配置
-
-修改数据路径，在train_models_spatial_temp.py中修改：
-
-    root_path = '/your/data/path'
-    pretrained_path = '/your/pretrained/model/path'
-
-修改模型参数，在create_model函数中调整：
-
-    model = SwinConvLSTM(
-        image_size=(256, 256),
-        in_channels=8,
-        out_channels=2,
-        feature_size=96,
-        depths=(2, 2, 6, 2),
-        num_heads=(3, 6, 12, 24),
-        hidden_dim=64,
-        dropout=0.1,
-    )
-
-## 结果分析
-
-评估指标：
-- Precision：精确率
-- Recall：召回率
-- F1 Score：F1分数
-- IoU：交并比
-- Specificity：特异性
-- Sensitivity：敏感性
-
-可视化输出：
-- 混淆矩阵
-- 训练曲线
-- 预测结果对比图
-- 模型架构图
-
-## 注意事项
-
-1. WandB配置：首次使用需要配置WandB账号和项目名称
-2. 预训练权重：建议使用ImageNet预训练的Swin Transformer权重初始化
-3. 为了适配 2D 预训练权重的维度，Swin 编码器的多头自注意力模块在四个阶段分别严格遵循了 (3, 6, 12, 24) 的配置，即超参数的多头注意力机制输入实际不生效。
+See [docs/reproduction.md](docs/reproduction.md),
+[docs/dataset_versions.md](docs/dataset_versions.md), and
+[docs/airborne_metadata.md](docs/airborne_metadata.md), and
+[docs/retraining_manifest.md](docs/retraining_manifest.md) for the complete
+evidence chain. Use
+[docs/manuscript_revision_outline.md](docs/manuscript_revision_outline.md) to
+rewrite the paper as a JEI imaging-methods article without carrying forward
+unsupported historical results.
