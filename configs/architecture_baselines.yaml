@@ -1,0 +1,12 @@
+experiment:
+  name: architecture_baselines_corrected_protocol
+  seeds: [41, 42, 43, 44, 45]
+  output_root: results/training_runs/architecture_baselines_corrected_protocol
+models:
+  - swin_convlstm
+  - swinunetr3d
+  - unet3d
+fairness_requirements:
+  - Record pretraining status separately for each architecture.
+  - Hold dataset partition, image size, sequence length, optimizer budget, and evaluation protocol fixed.
+  - Do not claim an architectural effect when other components differ.

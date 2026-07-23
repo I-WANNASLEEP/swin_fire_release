@@ -1,0 +1,35 @@
+experiment:
+  name: progressive_ablation_corrected_protocol
+  task: active_fire
+  seeds: [41, 42, 43, 44, 45]
+  output_root: results/training_runs/progressive_ablation_corrected_protocol
+common_controls:
+  splits: [splits/train_event_ids.txt, splits/validation_event_ids.txt, splits/test_event_ids.txt]
+  preprocessing: metadata/preprocessing_config.yaml
+  model_family: swin_convlstm
+  evaluation: validation-selected threshold, fixed final test evaluation
+variants:
+  model_a_full:
+    pretraining: cross_modal_rgb_mean_extension
+    copy_paste: progressive
+    scheduler: cosine_restart_decay
+    loss: {name: masked_hybrid, alpha: 0.5, beta: 0.5, gamma: 3.0}
+  model_b_without_copy_paste:
+    pretraining: cross_modal_rgb_mean_extension
+    copy_paste: disabled
+    scheduler: cosine_restart_decay
+    loss: {name: masked_hybrid, alpha: 0.5, beta: 0.5, gamma: 3.0}
+  model_c_without_restart_schedule:
+    pretraining: cross_modal_rgb_mean_extension
+    copy_paste: disabled
+    scheduler: step
+    loss: {name: masked_hybrid, alpha: 0.5, beta: 0.5, gamma: 3.0}
+  model_d_ce_only:
+    pretraining: cross_modal_rgb_mean_extension
+    copy_paste: disabled
+    scheduler: step
+    loss: {name: masked_cross_entropy}
+notes:
+  - Historical Model A/B/C and loss-ablation values are invalid because they used the old Hybrid Loss.
+  - Model D is CE-only; it should be rerun under the same code release for comparability.
+  - Materialize each variant as an executable single-variant config before training.

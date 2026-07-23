@@ -1,0 +1,23 @@
+experiment:
+  name: attention_ablation_corrected_loss
+  task: active_fire
+  seeds: [41, 42, 43, 44, 45]
+  output_root: results/training_runs/attention_ablation_corrected_loss
+controlled_parameters:
+  model: swin_convlstm
+  input_channels: 8
+  feature_size: 96
+  hidden_dim: 64
+  loss_config: configs/full_model.yaml#loss
+  optimizer_and_schedule: identical across variants
+  preprocessing: metadata/preprocessing_config.yaml
+variants:
+  - {attention: none}
+  - {attention: se}
+  - {attention: cbam}
+  - {attention: dcbam}
+statistics:
+  unit_of_repetition: independent seed
+  primary_summary: mean_plus_or_minus_standard_deviation
+  confidence_interval: bootstrap over held-out fire events
+  prohibited_unit: training epoch

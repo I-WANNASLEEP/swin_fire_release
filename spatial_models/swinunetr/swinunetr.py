@@ -17,7 +17,11 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch.autograd import profiler
-from torchinfo import summary
+try:
+    from torchinfo import summary
+except ModuleNotFoundError:
+    def summary(*args, **kwargs):
+        raise RuntimeError("Install torchinfo to use the optional model-summary debug entry point.")
 
 from spatial_models.swinunetr.swin import SwinTransformer
 from typing import Sequence, Tuple, Union

@@ -23,7 +23,16 @@ import torch.nn as nn
 from monai.networks.blocks.convolutions import Convolution, ResidualUnit
 from monai.networks.layers.factories import Act, Norm
 from monai.networks.layers.simplelayers import SkipConnection
-from monai.utils import alias, export
+try:
+    from monai.utils import alias, export
+except ImportError:
+    # MONAI 1.5 removed these registry decorators. They only provided aliases
+    # for MONAI namespace export and do not change this local model's behavior.
+    def export(*args, **kwargs):
+        return lambda obj: obj
+
+    def alias(*args, **kwargs):
+        return lambda obj: obj
 
 __all__ = ["UNet", "Unet"]
 

@@ -1,0 +1,9 @@
+Dataset: TS-SatFire active-fire task
+Canonical dataset page: https://www.kaggle.com/datasets/z789456sx/ts-satfire
+Canonical code revision: da7573219967edfe17e317310b66fd8a913f4a2e
+Dataset paper: https://doi.org/10.1038/s41597-025-06271-3
+
+STATUS: the source data archive is not present in this repository. Before a
+revised training run, record the downloaded archive filename, acquisition date,
+SHA256, source URL, and any local preprocessing deviations in that run's
+experiment manifest. Do not replace this file with an inferred version label.

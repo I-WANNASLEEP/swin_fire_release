@@ -1,0 +1,11 @@
+experiment:
+  name: initialization_ablation_corrected_loss
+  seeds: [41, 42, 43]
+  output_root: results/training_runs/initialization_ablation_corrected_loss
+variants:
+  - {initialization: cross_modal_rgb_mean_extension}
+  - {initialization: random}
+controlled_parameters:
+  attention: dcbam
+  loss_config: configs/full_model.yaml#loss
+  preprocessing: metadata/preprocessing_config.yaml
