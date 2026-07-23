@@ -1,0 +1,8 @@
+TS-SatFire upstream repository
+URL: https://github.com/zhaoyutim/TS-SatFire
+Pinned commit: da7573219967edfe17e317310b66fd8a913f4a2e
+Pinned on: 2026-07-23
+
+The commit pin is used for the official dataset-generation logic and event IDs.
+It does not certify a locally downloaded dataset archive. Record the archive
+SHA256 in each experiment manifest before any result is reported.

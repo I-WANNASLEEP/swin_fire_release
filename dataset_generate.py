@@ -1,3 +1,12 @@
+"""DEPRECATED_NOT_USED_IN_PAPER.
+
+This legacy helper has an unsafe directory-order / first-ten-event test split and
+does not represent the fixed partition used for the reproducible revision.  Keep
+it only for historical inspection.  Use ``scripts/materialize_splits.py`` to
+materialize the pinned event lists and the upstream generator at the pinned
+revision to build train/validation/test arrays with a per-window manifest.
+"""
+
 import argparse
 import pandas as pd
 import os

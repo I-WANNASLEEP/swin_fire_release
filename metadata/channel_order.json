@@ -1,0 +1,16 @@
+{
+  "task": "active_fire",
+  "tensor_layout": "[sample, channel, time, height, width]",
+  "channels": [
+    "I1_day",
+    "I2_day",
+    "I3_day",
+    "I4_day",
+    "I5_day",
+    "M11_day",
+    "I4_night",
+    "I5_night"
+  ],
+  "source": "TS-SatFire satimg_dataset_processor.py at da7573219967edfe17e317310b66fd8a913f4a2e",
+  "notes": "The upstream active-fire generator concatenates six daytime arrays with two nighttime arrays."
+}

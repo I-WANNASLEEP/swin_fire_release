@@ -1,0 +1,8 @@
+{
+  "task": "active_fire",
+  "channel_order_file": "metadata/channel_order.json",
+  "mean": [18.76488, 27.441864, 20.584806, 305.99478, 294.31738, 14.625097, 276.4207, 275.16766],
+  "std": [15.911591, 14.879259, 10.832616, 21.761852, 24.703484, 9.878246, 40.64329, 40.7657],
+  "source": "Legacy train_models_spatial_temp.py active-fire constants",
+  "status": "historical values; recompute from the locked training-event partition and store the generated source record before reporting revised results"
+}

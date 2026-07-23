@@ -1,0 +1,14 @@
+upstream_commit: da7573219967edfe17e317310b66fd8a913f4a2e
+task: active_fire
+tensor_layout: [sample, channel, time, height, width]
+image_size: [256, 256]
+default_sequence_length: 10
+default_interval: 3
+channels_file: metadata/channel_order.json
+normalization_file: metadata/normalization_statistics.json
+invalid_label_value: -1
+sample_manifest_requirement: >-
+  The dataset-generation step must emit one row per generated window with event_id,
+  source filename, temporal indices, and split. Aggregate NPY files without this
+  manifest cannot be used for paper statistics.
+test_policy: final evaluation only; no threshold or Tversky selection on test events

@@ -1,6 +1,9 @@
 import argparse
+import json
 import os
 import time
+from pathlib import Path
+from types import SimpleNamespace
 import numpy as np
 import torch
 import torch.nn as nn
@@ -8,7 +11,42 @@ import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import wandb
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ModuleNotFoundError:
+    WANDB_AVAILABLE = False
+
+    class _DisabledWandb:
+        """Minimal no-op surface so disabled tracking never blocks training."""
+
+        run = SimpleNamespace(name="disabled")
+
+        @staticmethod
+        def login(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def init(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def define_metric(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def log(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def finish(*args, **kwargs):
+            return None
+
+        class Image:
+            def __init__(self, *args, **kwargs):
+                pass
+
+    wandb = _DisabledWandb()
 import pandas as pd
 from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau, CosineAnnealingLR
 import torch.nn.functional as F
@@ -37,7 +75,6 @@ class CosineAnnealingWarmRestartsWithDecay(CosineAnnealingWarmRestarts):
             self._decay_base_lrs()
 
 # ------------------- 原始导入 -------------------
-from monai.losses import FocalLoss
 from monai.metrics import MeanIoU, DiceMetric
 from monai.data import decollate_batch
 from monai.transforms import Activations, AsDiscrete, Compose
@@ -48,6 +85,7 @@ from spatial_models.swinunetr.swinunetr import SwinUNETR
 from spatial_models.unetr.unetr import UNETR
 from spatial_models.swin_convlstm import SwinConvLSTM, ConvLSTMCell
 from satimg_dataset_processor.data_generator_torch import Normalize, FireDataset
+from losses.masked_hybrid_loss import MaskedCrossEntropyLoss, MaskedHybridLoss
 
 from sklearn.metrics import (
     f1_score, jaccard_score, precision_recall_fscore_support,
@@ -56,7 +94,10 @@ from sklearn.metrics import (
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import seaborn as sns
+try:
+    import seaborn as sns
+except ModuleNotFoundError:
+    sns = None
 
 # ==================== 新增组件 ====================
 # 删除了 InputAdapter 和 SwinConvLSTM_Wrapper 类，避免与 swin_convlstm.py 中的设计理念冲突
@@ -131,11 +172,21 @@ parser.add_argument('-ed', type=int, help='embedding dimension')
 parser.add_argument('-nc', type=int, help='n_channel')
 parser.add_argument('-ts', type=int, help='ts_length')
 parser.add_argument('-it', type=int, help='interval')
-parser.add_argument('-epoch', type=int, help='Load Epoch', default=0, nargs='?')
+parser.add_argument('-epoch', '--max-epochs', dest='max_epochs', type=int, default=100, help='Maximum training epochs')
 parser.add_argument('-patience', type=int, default=15, help='Early stopping patience')
 parser.add_argument('-grad_clip', type=float, default=1.0, help='Gradient clipping max norm')
-parser.add_argument('-scheduler', type=str, default='cosine', choices=['cosine', 'plateau', 'step'], help='Learning rate scheduler')
+parser.add_argument('-scheduler', type=str, default='cosine_restart_decay', choices=['cosine', 'cosine_restart_decay', 'plateau', 'step'], help='Learning-rate scheduler')
 parser.add_argument('-decay_factor', type=float, default=0.99, help='Decay factor for LR peak after each restart (default 0.99)')
+parser.add_argument('-tversky_alpha', type=float, default=0.5, help='Tversky false-positive weight; select on validation only')
+parser.add_argument('-tversky_beta', type=float, default=0.5, help='Tversky false-negative weight; select on validation only')
+parser.add_argument('-focal_gamma', type=float, default=3.0, help='Masked focal-loss gamma')
+parser.add_argument('--loss-type', choices=('masked_hybrid', 'masked_cross_entropy'), default='masked_hybrid', help='Loss for a controlled ablation')
+parser.add_argument('--data-root', type=str, default=os.environ.get('TS_SATFIRE_DATA_ROOT'), help='Directory containing dataset_train and dataset_val')
+parser.add_argument('--pretrained-path', type=str, default=os.environ.get('SWIN_PRETRAINED_PATH'), help='Optional Swin pretrained checkpoint')
+parser.add_argument('--output-dir', type=str, default='results/training_runs/legacy', help='Directory for checkpoints and diagnostic artifacts')
+parser.add_argument('--wandb-mode', choices=('online', 'offline', 'disabled'), default='disabled', help='WandB execution mode')
+parser.add_argument('--wandb-project', default='ts_satfire_reproducible', help='WandB project name')
+parser.add_argument('--wandb-entity', default=None, help='Optional WandB entity; never hard-code a personal account')
 
 args = parser.parse_args()
 
@@ -148,7 +199,7 @@ ts_length = args.ts
 attn_version = args.av
 run = args.r
 lr = args.lr
-MAX_EPOCHS = 100
+MAX_EPOCHS = args.max_epochs
 weight_decay = lr / 10
 num_classes = 2
 n_channel = args.nc
@@ -157,6 +208,9 @@ mode = args.mode
 patience = args.patience
 grad_clip_max_norm = args.grad_clip
 scheduler_type = args.scheduler
+tversky_alpha = args.tversky_alpha
+tversky_beta = args.tversky_beta
+focal_gamma = args.focal_gamma
 
 # ==================== 设置随机种子 ====================
 SEED = run + 41
@@ -168,94 +222,17 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = True
 
-root_path = '/home/congwei/ts-satfire-tran'
+if not args.data_root:
+    parser.error('--data-root or TS_SATFIRE_DATA_ROOT is required; source edits are not supported.')
+root_path = os.path.abspath(os.path.expanduser(args.data_root))
+output_dir = Path(args.output_dir).expanduser().resolve()
+checkpoint_dir = output_dir / 'checkpoints'
+confusion_matrix_dir = output_dir / 'confusion_matrices'
+epoch_metrics_path = output_dir / 'epoch_metrics.jsonl'
+checkpoint_dir.mkdir(parents=True, exist_ok=True)
+confusion_matrix_dir.mkdir(parents=True, exist_ok=True)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
-
-# ==================== HybridLoss (回滚到 2.19 策略 + CE) ====================
-class HybridLoss(nn.Module):
-    """
-    回归版：结合 2.19 的稳定性。
-    1. 忽略 -1 区域 (Masking) 而不是强行惩罚。
-    2. 加回 CrossEntropy Loss 辅助收敛。
-    """
-    def __init__(self, tversky_weight=0.4, focal_weight=0.3, ce_weight=0.3):
-        super().__init__()
-        self.tversky_weight = tversky_weight
-        self.focal_weight = focal_weight
-        self.ce_weight = ce_weight
-        
-        # Tversky 参数 (均衡模式)
-        self.alpha = 0.5
-        self.beta = 0.5
-        
-        self.focal_loss = FocalLoss(
-            include_background=False, to_onehot_y=True, gamma=3.0, reduction='none'
-        )
-        # CE Loss 忽略 -1
-        self.ce_loss = nn.CrossEntropyLoss(reduction='none', ignore_index=-1)
-
-    def tversky_loss_manual(self, pred, target, alpha, beta):
-        pred = torch.sigmoid(pred)
-        pred_flat = pred.reshape(-1)
-        target_flat = target.reshape(-1)
-        TP = (pred_flat * target_flat).sum()
-        FP = (pred_flat * (1 - target_flat)).sum()
-        FN = ((1 - pred_flat) * target_flat).sum()
-        return 1 - (TP + 1e-6) / (TP + alpha * FN + beta * FP + 1e-6)
-
-    def forward(self, preds, target):
-        # 兼容 Deep Supervision (如果是列表，取第一个)
-        if isinstance(preds, list):
-            pred = preds[0]
-        else:
-            pred = preds
-
-        # 1. 预处理 Target
-        if target.dim() == 5 and target.shape[1] > 1:
-            target = target[:, 0:1, ...]
-        elif target.dim() == 4:
-            target = target.unsqueeze(1)
-        
-        # 2. 生成 Mask (关键回归：忽略 -1 区域)
-        valid_mask = (target != -1).float()
-        
-        # 3. 准备二值标签 (0 或 1)
-        target_binary = ((target > 0) & (target != -1)).long()
-        target_float = target_binary.float()
-        
-        # === 计算 Tversky (只在有效区域) ===
-        pred_fire_logit = pred[:, 1:2, ...]
-        loss_tversky = self.tversky_loss_manual(
-            pred_fire_logit * valid_mask, 
-            target_float * valid_mask, 
-            self.alpha, self.beta
-        )
-        
-        # === 计算 Focal (加权平均) ===
-        loss_focal_map = self.focal_loss(pred, target_binary)
-        loss_focal = (loss_focal_map * valid_mask).sum() / (valid_mask.sum() + 1e-6)
-        
-        # === 计算 CE (加权平均) ===
-        target_squeeze = target_binary.squeeze(1)  # [B, T, H, W]
-        valid_mask_squeeze = valid_mask.squeeze(1)
-        loss_ce_map = self.ce_loss(pred, target_squeeze)
-        loss_ce = (loss_ce_map * valid_mask_squeeze).sum() / (valid_mask_squeeze.sum() + 1e-6)
-        
-        # 总损失
-        total_loss = (self.tversky_weight * loss_tversky + 
-                      self.focal_weight * loss_focal + 
-                      self.ce_weight * loss_ce)
-        
-        return total_loss, {
-            'tversky_loss': loss_tversky.item(),
-            'focal_loss': loss_focal.item(),
-            'ce_loss': loss_ce.item(),
-            'fire_weight': 0.0,
-            'fire_ratio': 0.0
-        }
-
-
 
 # ==================== 早停机制 ====================
 class EarlyStopping:
@@ -361,11 +338,19 @@ class MetricsCalculator:
         print(f"  FP: {metrics['false_positive']}, FN: {metrics['false_negative']}")
         
     def plot_confusion_matrix(self, cm, save_path, title="Confusion Matrix"):
-        """绘制混淆矩阵"""
+        """Draw a confusion matrix; seaborn is optional for normal training."""
         plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                    xticklabels=['Negative', 'Positive'],
-                    yticklabels=['Negative', 'Positive'])
+        if sns is not None:
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                        xticklabels=['Negative', 'Positive'],
+                        yticklabels=['Negative', 'Positive'])
+        else:
+            plt.imshow(cm, cmap='Blues')
+            plt.xticks([0, 1], ['Negative', 'Positive'])
+            plt.yticks([0, 1], ['Negative', 'Positive'])
+            for row in range(cm.shape[0]):
+                for col in range(cm.shape[1]):
+                    plt.text(col, row, f'{int(cm[row, col])}', ha='center', va='center')
         plt.ylabel('True Label')
         plt.xlabel('Predicted Label')
         plt.title(title)
@@ -375,8 +360,18 @@ class MetricsCalculator:
 
 # ==================== WandB配置 ====================
 def wandb_config(model_name, num_heads, hidden_size, batch_size, attn_version):
-    wandb.login()
-    wandb.init(project=f"afba_{model_name}_hardneg", entity="----------")#entity需要使用自己的账号
+    if args.wandb_mode != 'disabled' and not WANDB_AVAILABLE:
+        raise RuntimeError(
+            'WandB is not installed. Install it for online/offline tracking or use --wandb-mode disabled.'
+        )
+    if args.wandb_mode == 'online':
+        wandb.login()
+    wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        mode=args.wandb_mode,
+        dir=str(output_dir),
+    )
     wandb.run.name = (f'nh_{num_heads}_hs_{hidden_size}_bs_{batch_size}_'
                       f'attn_{attn_version}_seed_{SEED}_scheduler_{scheduler_type}')
     wandb.config = {
@@ -568,8 +563,6 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
         'tversky_loss': 0.0,
         'focal_loss': 0.0,
         'ce_loss': 0.0,
-        'fire_weight': 0.0,
-        'fire_ratio': 0.0
     }
     total_loss = 0.0
 
@@ -658,7 +651,7 @@ def validate(model, dataloader, criterion, device, post_trans, epoch, max_epochs
     total_fn = 0
     total_tn = 0
     
-    loss_components = {'tversky_loss': 0.0, 'focal_loss': 0.0, 'ce_loss': 0.0, 'fire_weight': 0.0, 'fire_ratio': 0.0}
+    loss_components = {'tversky_loss': 0.0, 'focal_loss': 0.0, 'ce_loss': 0.0}
     
     mean_iou = MeanIoU(include_background=False, reduction='mean')
     mean_dice = DiceMetric(include_background=False, reduction='mean')
@@ -913,9 +906,9 @@ model = create_model(
 )
 
 count_parameters(model)
-pretrained_path = '/home/congwei/swin_fire/swin_pretrained/swin_tiny_patch4_window7_224.pth'
+pretrained_path = args.pretrained_path
 # [必须] 调用智能权重加载
-if os.path.exists(pretrained_path) and hasattr(model, 'smart_load_weights'):
+if pretrained_path and os.path.exists(pretrained_path) and hasattr(model, 'smart_load_weights'):
     print(f"- Loading pretrained weights from: {pretrained_path}")
     model.smart_load_weights(pretrained_path)
     print(f"- Successfully loaded pretrained weights for {model_name}")
@@ -929,12 +922,19 @@ model.to(device)
 
 print(f'Number of Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M')
 
-# Using HybridLoss (Reverted to 2.19 logic + CE)
-criterion = HybridLoss(
-    tversky_weight=0.4,
-    focal_weight=0.3,
-    ce_weight=0.3
-)
+# Correct masked two-class objective. CE-only is retained only as a controlled
+# Model-D comparator; all Hybrid-Loss variants use the corrected implementation.
+if args.loss_type == 'masked_hybrid':
+    criterion = MaskedHybridLoss(
+        tversky_weight=0.4,
+        focal_weight=0.3,
+        ce_weight=0.3,
+        alpha=tversky_alpha,
+        beta=tversky_beta,
+        gamma=focal_gamma,
+    )
+else:
+    criterion = MaskedCrossEntropyLoss()
 
 # Use unified learning rate parameter groups
 param_groups = get_unified_lr_groups(model, lr)
@@ -945,17 +945,29 @@ optimizer = optim.AdamW(
     eps=1e-8
 )
 print("Created optimizer with unified learning rate:")
-print(f"   Unified LR: {lr:.2e} (managed by CosineAnnealingWarmRestartsWithDecay)")
+print(f"   Unified LR: {lr:.2e}")
 
-# Use CosineAnnealingWarmRestartsWithDecay
-scheduler = CosineAnnealingWarmRestartsWithDecay(
+# Make the selected scheduler real rather than merely recording a CLI string.
+# Restarted cosine is the corrected full-model default.  Step and plateau are
+# controlled alternatives for documented ablations only.
+if scheduler_type in ('cosine', 'cosine_restart_decay'):
+    scheduler = CosineAnnealingWarmRestartsWithDecay(
         optimizer,
         T_0=MAX_EPOCHS,
         T_mult=1,
         decay_factor=args.decay_factor,
-        eta_min=1e-7
-)
-print(f"Using CosineAnnealingWarmRestartsWithDecay with decay_factor={args.decay_factor} (no warmup).")
+        eta_min=1e-7,
+    )
+    scheduler_per_batch = True
+    print(f"Using CosineAnnealingWarmRestartsWithDecay with decay_factor={args.decay_factor} (no warmup).")
+elif scheduler_type == 'step':
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=max(1, MAX_EPOCHS // 3), gamma=0.1)
+    scheduler_per_batch = False
+    print(f"Using StepLR every {max(1, MAX_EPOCHS // 3)} epochs with gamma=0.1.")
+else:
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=max(1, patience // 3))
+    scheduler_per_batch = False
+    print(f"Using ReduceLROnPlateau with patience={max(1, patience // 3)}.")
 
 scaler = GradScaler()
 
@@ -969,10 +981,6 @@ early_stopping = EarlyStopping(patience=patience, min_delta=0.0001)
 # 保存最佳模型：基于 F1 score，只保存一个最佳模型
 best_f1 = 0.0
 best_model_path = None
-
-# 创建保存目录
-os.makedirs('saved_models', exist_ok=True)
-os.makedirs('confusion_matrices', exist_ok=True)
 
 print("\n" + "="*50)
 print("Starting Training...")
@@ -1010,15 +1018,13 @@ for epoch in range(MAX_EPOCHS):
     train_loss, train_loss_components = train_one_epoch(
         model, train_dataloader, criterion, optimizer, scaler, device,
         grad_clip_max_norm, epoch + 1, MAX_EPOCHS, 
-        scheduler=scheduler
+        scheduler=scheduler if scheduler_per_batch else None
     )
     
     print(f"Train Loss: {train_loss:.4f}")
     print(f"  - Tversky: {train_loss_components['tversky_loss']:.4f}")
     print(f"  - Focal: {train_loss_components['focal_loss']:.4f}")
     print(f"  - CE: {train_loss_components['ce_loss']:.4f}")
-    print(f"  - Fire Weight: {train_loss_components['fire_weight']:.4f}")
-    print(f"  - Fire Ratio: {train_loss_components['fire_ratio']:.4f}")
     
     # 验证
     val_loss, val_loss_components, mean_iou_val, mean_dice_val, custom_metrics = validate(
@@ -1029,8 +1035,6 @@ for epoch in range(MAX_EPOCHS):
     print(f"  - Tversky: {val_loss_components['tversky_loss']:.4f}")
     print(f"  - Focal: {val_loss_components['focal_loss']:.4f}")
     print(f"  - CE: {val_loss_components['ce_loss']:.4f}")
-    print(f"  - Fire Weight: {val_loss_components['fire_weight']:.4f}")
-    print(f"  - Fire Ratio: {val_loss_components['fire_ratio']:.4f}")
     print(f"Mean IoU: {mean_iou_val:.4f}, Mean Dice: {mean_dice_val:.4f}")
     
     # 打印自定义指标
@@ -1069,14 +1073,10 @@ for epoch in range(MAX_EPOCHS):
         'train_tversky_loss': train_loss_components['tversky_loss'],
         'train_focal_loss': train_loss_components['focal_loss'],
         'train_ce_loss': train_loss_components['ce_loss'],
-        'train_fire_weight': train_loss_components['fire_weight'],
-        'train_fire_ratio': train_loss_components['fire_ratio'],
         'val_loss': val_loss,
         'val_tversky_loss': val_loss_components['tversky_loss'],
         'val_focal_loss': val_loss_components['focal_loss'],
         'val_ce_loss': val_loss_components['ce_loss'],
-        'val_fire_weight': val_loss_components['fire_weight'],
-        'val_fire_ratio': val_loss_components['fire_ratio'],
         'val_miou': mean_iou_val,
         'val_mdice': mean_dice_val,
         'val_precision': custom_metrics['precision'],
@@ -1092,6 +1092,31 @@ for epoch in range(MAX_EPOCHS):
         'val_best_iou': custom_metrics['best_iou'],
         'global_best_f1': early_stopping.best_f1,
     }
+
+    # Persist every epoch locally before optional remote tracking.  This JSONL
+    # file is the source for convergence curves; it is intentionally separate
+    # from test-event metric records used for paper tables.
+    epoch_record = {
+        'record_type': 'training_epoch',
+        'model': model_name,
+        'attention': attn_version,
+        'loss_type': args.loss_type,
+        'seed': SEED,
+        'epoch': epoch + 1,
+        **{
+            key: (float(value) if value is not None else None)
+            for key, value in log_dict.items()
+            if key != 'epoch'
+        },
+    }
+    with epoch_metrics_path.open('a', encoding='utf-8') as epoch_metrics_file:
+        epoch_metrics_file.write(json.dumps(epoch_record, sort_keys=True) + '\n')
+
+    if not scheduler_per_batch:
+        if scheduler_type == 'plateau':
+            scheduler.step(val_loss)
+        else:
+            scheduler.step()
     
     try:
         wandb.log(log_dict)
@@ -1107,14 +1132,7 @@ for epoch in range(MAX_EPOCHS):
     # 保存混淆矩阵
     if (epoch + 1) % 10 == 0:
         metrics_calc = MetricsCalculator()
-        cm_path = f'confusion_matrices/cm_epoch_{epoch + 1}_seed_{SEED}.png'
-        metrics_calc.plot_confusion_matrix(
-            custom_metrics['confusion_matrix'], 
-            cm_path, 
-            title=f'Confusion Matrix - Epoch {epoch + 1}'
-        )
-        wandb.log({f'confusion_matrix_epoch_{epoch + 1}': wandb.Image(cm_path)})
-        cm_path = f'confusion_matrices/cm_epoch_{epoch + 1}_seed_{SEED}.png'
+        cm_path = str(confusion_matrix_dir / f'cm_epoch_{epoch + 1}_seed_{SEED}.png')
         metrics_calc.plot_confusion_matrix(
             custom_metrics['confusion_matrix'], 
             cm_path, 
@@ -1151,9 +1169,10 @@ for epoch in range(MAX_EPOCHS):
         custom_metrics['best_f1'] = best_f1_optimized
 
         best_f1 = current_f1
-        best_model_path = (f"saved_models/model_{model_name}_run_{run}_seed_{SEED}_mode_{mode}_"
+        best_model_path = str(checkpoint_dir / (
+                    f"model_{model_name}_run_{run}_seed_{SEED}_mode_{mode}_"
                     f"nh_{num_heads}_hs_{hidden_size}_bs_{batch_size}_av_{attn_version}_"
-                    f"epoch_{epoch + 1}_f1_{current_f1:.4f}_thr_{best_threshold:.2f}.pth")
+                    f"epoch_{epoch + 1}_f1_{current_f1:.4f}_thr_{best_threshold:.2f}.pth"))
 
         torch.save({
             'epoch': epoch + 1,
@@ -1183,4 +1202,3 @@ if best_model_path:
     print(f"Best F1 Score: {best_f1:.4f}")
 
 wandb.finish()
-
