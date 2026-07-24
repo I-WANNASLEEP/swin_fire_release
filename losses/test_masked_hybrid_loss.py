@@ -69,6 +69,57 @@ class MaskedHybridLossTest(unittest.TestCase):
             value.backward()
             self.assertTrue(torch.isfinite(logits.grad).all())
 
+    def test_positive_label_encodings_have_identical_loss_and_gradients(self) -> None:
+        binary = self._target()
+        encoded = binary.clone()
+        encoded[encoded.eq(1)] = 255
+        logits_binary = self._logits(requires_grad=True)
+        logits_encoded = logits_binary.detach().clone().requires_grad_(True)
+
+        binary_value, binary_components = self.loss(logits_binary, binary)
+        encoded_value, encoded_components = self.loss(logits_encoded, encoded)
+        binary_value.backward()
+        encoded_value.backward()
+
+        self.assertTrue(torch.allclose(binary_value, encoded_value, atol=1e-7, rtol=1e-7))
+        for key in ("tversky_loss", "focal_loss", "ce_loss", "valid_pixels"):
+            self.assertAlmostEqual(binary_components[key], encoded_components[key], places=7)
+        self.assertTrue(
+            torch.allclose(logits_binary.grad, logits_encoded.grad, atol=1e-7, rtol=1e-7)
+        )
+
+    def test_supported_targets_produce_nonnegative_components(self) -> None:
+        targets = []
+        for positive_value in (1, 255):
+            target = torch.zeros((1, 1, 1, 1, 10_000), dtype=torch.long)
+            target[..., 0] = positive_value
+            targets.append(target)
+        logits_template = torch.empty((1, 2, 1, 1, 10_000))
+        logits_template[:, 0] = 10.0
+        logits_template[:, 1] = -10.0
+        logits_template[:, 0, ..., 0] = -1.0
+        logits_template[:, 1, ..., 0] = 1.0
+
+        for target in targets:
+            logits = logits_template.clone().requires_grad_(True)
+            value, components = self.loss(logits, target)
+            self.assertGreaterEqual(float(value.detach()), 0.0)
+            for key in ("tversky_loss", "focal_loss", "ce_loss"):
+                self.assertGreaterEqual(components[key], 0.0)
+            value.backward()
+            self.assertTrue(torch.isfinite(logits.grad).all())
+
+    def test_rejects_nan_infinite_and_unexpected_negative_targets(self) -> None:
+        logits = self._logits()
+        bad_targets = []
+        for value in (float("nan"), float("inf"), -2.0):
+            target = self._target().float()
+            target[:, :, 0, 1, 1] = value
+            bad_targets.append(target)
+        for target in bad_targets:
+            with self.assertRaises(ValueError):
+                self.loss(logits, target)
+
     def test_softmax_probability_sums_to_one(self) -> None:
         logits = self._logits()
         fire = self.loss.fire_probability(logits)
@@ -90,6 +141,22 @@ class MaskedHybridLossTest(unittest.TestCase):
         mask = invalid.unsqueeze(1).expand_as(logits)
         self.assertTrue(torch.equal(logits.grad[mask], torch.zeros_like(logits.grad[mask])))
 
+    def test_ce_only_binarizes_all_positive_label_encodings(self) -> None:
+        criterion = MaskedCrossEntropyLoss()
+        binary = self._target()
+        encoded = binary.clone()
+        encoded[encoded.eq(1)] = 255
+        logits_binary = self._logits(requires_grad=True)
+        logits_encoded = logits_binary.detach().clone().requires_grad_(True)
+        binary_value, _ = criterion(logits_binary, binary)
+        encoded_value, _ = criterion(logits_encoded, encoded)
+        binary_value.backward()
+        encoded_value.backward()
+        self.assertTrue(torch.allclose(binary_value, encoded_value, atol=1e-7, rtol=1e-7))
+        self.assertTrue(
+            torch.allclose(logits_binary.grad, logits_encoded.grad, atol=1e-7, rtol=1e-7)
+        )
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
     def test_cuda_matches_cpu(self) -> None:
         logits_cpu = self._logits()
@@ -102,6 +169,7 @@ class MaskedHybridLossTest(unittest.TestCase):
     def test_cuda_amp_is_finite_and_stable(self) -> None:
         logits = self._logits(device="cuda", requires_grad=True)
         target = self._target(device="cuda")
+        target[target.eq(1)] = 255
         reference, _ = self.loss(logits.float(), target)
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             mixed_value, _ = self.loss(logits, target)

@@ -57,6 +57,7 @@ class FireDataset(Dataset):
         self.dilation_range = dilation_range
         self.dilation_grow_epochs = dilation_grow_epochs
         self.use_random_dilation = use_random_dilation
+        self.enable_copy_paste = enable_copy_paste
         
        
         self.aug_probs = {
@@ -79,7 +80,6 @@ class FireDataset(Dataset):
         #     'fire_crop': 0.0,
         #     'copy_paste': 0.0
         # }
-        self.enable_copy_paste = enable_copy_paste
         self.current_epoch = 0
         
     def set_epoch(self, epoch):

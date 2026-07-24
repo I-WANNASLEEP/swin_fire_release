@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -28,7 +29,7 @@ except ModuleNotFoundError:
 
         @staticmethod
         def init(*args, **kwargs):
-            return None
+            return SimpleNamespace(id="disabled", url=None, name="disabled")
 
         @staticmethod
         def define_metric(*args, **kwargs):
@@ -75,17 +76,22 @@ class CosineAnnealingWarmRestartsWithDecay(CosineAnnealingWarmRestarts):
             self._decay_base_lrs()
 
 # ------------------- 原始导入 -------------------
-from monai.metrics import MeanIoU, DiceMetric
-from monai.data import decollate_batch
-from monai.transforms import Activations, AsDiscrete, Compose
-
 from spatial_models.unet import UNet
 from spatial_models.attentionunet import AttentionUnet
 from spatial_models.swinunetr.swinunetr import SwinUNETR
 from spatial_models.unetr.unetr import UNETR
 from spatial_models.swin_convlstm import SwinConvLSTM, ConvLSTMCell
 from satimg_dataset_processor.data_generator_torch import Normalize, FireDataset
+from datasets.label_diagnostics import summarize_label_file
 from losses.masked_hybrid_loss import MaskedCrossEntropyLoss, MaskedHybridLoss
+from training_protocol import (
+    VALIDATION_THRESHOLDS,
+    EarlyStopping,
+    checkpoint_is_eligible,
+    early_stopping_is_enabled,
+    select_validation_threshold,
+    validate_protocol,
+)
 
 from sklearn.metrics import (
     f1_score, jaccard_score, precision_recall_fscore_support,
@@ -181,12 +187,33 @@ parser.add_argument('-tversky_alpha', type=float, default=0.5, help='Tversky fal
 parser.add_argument('-tversky_beta', type=float, default=0.5, help='Tversky false-negative weight; select on validation only')
 parser.add_argument('-focal_gamma', type=float, default=3.0, help='Masked focal-loss gamma')
 parser.add_argument('--loss-type', choices=('masked_hybrid', 'masked_cross_entropy'), default='masked_hybrid', help='Loss for a controlled ablation')
+parser.add_argument(
+    '--checkpoint-after-epoch',
+    type=int,
+    default=50,
+    help='Do not retain a best checkpoint through this epoch; first eligible epoch is the next one.',
+)
+parser.add_argument(
+    '--early-stopping-after-epoch',
+    type=int,
+    default=100,
+    help='Observe F1 without counting patience through this epoch; first enabled epoch is the next one.',
+)
+parser.add_argument(
+    '--validation-thresholds',
+    type=float,
+    nargs='+',
+    default=list(VALIDATION_THRESHOLDS),
+    help='Locked validation threshold grid.',
+)
 parser.add_argument('--no-copy-paste', action='store_true', help='Disable copy-paste augmentation for Model B/C/D ablations')
 parser.add_argument('--data-root', type=str, default=os.environ.get('TS_SATFIRE_DATA_ROOT'), help='Directory containing dataset_train and dataset_val')
 parser.add_argument('--pretrained-path', type=str, default=os.environ.get('SWIN_PRETRAINED_PATH'), help='Optional Swin pretrained checkpoint')
+parser.add_argument('--allow-random-init', action='store_true',
+                    help='Explicitly permit random initialization for the controlled initialization ablation.')
 parser.add_argument('--output-dir', type=str, default='results/training_runs/legacy', help='Directory for checkpoints and diagnostic artifacts')
 parser.add_argument('--wandb-mode', choices=('online', 'offline', 'disabled'), default='disabled', help='WandB execution mode')
-parser.add_argument('--wandb-project', default='swinfire_jei_resubmission_v2', help='WandB project name')
+parser.add_argument('--wandb-project', default='ts_satfire_reproducible', help='WandB project name')
 parser.add_argument('--wandb-entity', default=None, help='Optional WandB entity; never hard-code a personal account')
 parser.add_argument('--wandb-require-final-metrics', action='store_true',
                     help='Reject non-online tracking: final paper metrics must have a remote W&B record.')
@@ -216,6 +243,18 @@ scheduler_type = args.scheduler
 tversky_alpha = args.tversky_alpha
 tversky_beta = args.tversky_beta
 focal_gamma = args.focal_gamma
+selection_protocol = validate_protocol(
+    checkpoint_after_epoch=args.checkpoint_after_epoch,
+    early_stopping_after_epoch=args.early_stopping_after_epoch,
+    thresholds=args.validation_thresholds,
+)
+checkpoint_after_epoch = selection_protocol['checkpoint_after_epoch']
+early_stopping_after_epoch = selection_protocol['early_stopping_after_epoch']
+validation_thresholds = selection_protocol['validation_thresholds']
+if MAX_EPOCHS <= checkpoint_after_epoch:
+    parser.error(
+        f'--max-epochs must exceed --checkpoint-after-epoch ({checkpoint_after_epoch}).'
+    )
 
 # ==================== 设置随机种子 ====================
 SEED = run + 41
@@ -232,49 +271,57 @@ if not args.data_root:
 if args.wandb_require_final_metrics and args.wandb_mode != 'online':
     parser.error('--wandb-require-final-metrics requires --wandb-mode online.')
 root_path = os.path.abspath(os.path.expanduser(args.data_root))
+if not os.path.isdir(root_path):
+    parser.error(f'--data-root does not exist or is not a directory: {root_path}')
+image_path = os.path.join(
+    root_path, f'dataset_train/{mode}_train_img_seqtoseq_alll_{ts_length}i_{interval}.npy'
+)
+label_path = os.path.join(
+    root_path, f'dataset_train/{mode}_train_label_seqtoseq_alll_{ts_length}i_{interval}.npy'
+)
+val_image_path = os.path.join(
+    root_path, f'dataset_val/{mode}_val_img_seqtoseq_alll_{ts_length}i_{interval}.npy'
+)
+val_label_path = os.path.join(
+    root_path, f'dataset_val/{mode}_val_label_seqtoseq_alll_{ts_length}i_{interval}.npy'
+)
+required_data_files = (image_path, label_path, val_image_path, val_label_path)
+missing_data_files = [path for path in required_data_files if not os.path.isfile(path)]
+if missing_data_files:
+    parser.error('Required preprocessed arrays are missing: ' + ', '.join(missing_data_files))
+
+pretrained_path = (
+    os.path.abspath(os.path.expanduser(args.pretrained_path))
+    if args.pretrained_path
+    else None
+)
+if pretrained_path and not os.path.isfile(pretrained_path):
+    parser.error(f'--pretrained-path does not exist: {pretrained_path}')
+if not pretrained_path and not args.allow_random_init:
+    parser.error(
+        'A verified --pretrained-path is required. Use --allow-random-init only '
+        'for the controlled random-initialization ablation.'
+    )
+
 output_dir = Path(args.output_dir).expanduser().resolve()
+if args.run_manifest and not Path(args.run_manifest).expanduser().is_file():
+    parser.error(f'--run-manifest does not exist: {args.run_manifest}')
 checkpoint_dir = output_dir / 'checkpoints'
 confusion_matrix_dir = output_dir / 'confusion_matrices'
 epoch_metrics_path = output_dir / 'epoch_metrics.jsonl'
 wandb_run_record_path = output_dir / 'wandb_run.json'
+startup_provenance_path = output_dir / 'startup_provenance.json'
 checkpoint_dir.mkdir(parents=True, exist_ok=True)
 confusion_matrix_dir.mkdir(parents=True, exist_ok=True)
-if args.run_manifest and not Path(args.run_manifest).expanduser().is_file():
-    parser.error(f'--run-manifest does not exist: {args.run_manifest}')
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    
 
-# ==================== 早停机制 ====================
-class EarlyStopping:
-    """早停机制，只监控 F1 得分"""
-    def __init__(self, patience=50, min_delta=0.0001):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_f1 = None
-        self.early_stop = False
-        
-    def __call__(self, val_f1):
-        if self.best_f1 is None:
-            self.best_f1 = val_f1
-            return False
-        
-        f1_improved = val_f1 > (self.best_f1 + self.min_delta)
-        
-        if f1_improved:
-            self.best_f1 = val_f1
-            self.counter = 0
-            print(f"  - EarlyStopping improved (f1: {val_f1:.4f})")
-        else:
-            print(f"  - EarlyStopping counter: {self.counter}/{self.patience} "
-                  f"[f1: {val_f1:.4f} vs best {self.best_f1:.4f}]")
-            
-        if self.counter >= self.patience:
-            self.early_stop = True
-            print(f"\n- Early stopping triggered! No F1 improvement for {self.patience} epochs.")
-            print(f"   Best F1: {self.best_f1:.4f}")
 
-        return self.early_stop
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # ==================== 评估指标 ====================
@@ -369,7 +416,9 @@ class MetricsCalculator:
         plt.close()
 
 # ==================== WandB配置 ====================
-def wandb_config(model_name, num_heads, hidden_size, batch_size, attn_version):
+def wandb_config(
+    model_name, num_heads, hidden_size, batch_size, attn_version, startup_provenance
+):
     if args.wandb_mode != 'disabled' and not WANDB_AVAILABLE:
         raise RuntimeError(
             'WandB is not installed. Install it for online/offline tracking or use --wandb-mode disabled.'
@@ -393,6 +442,11 @@ def wandb_config(model_name, num_heads, hidden_size, batch_size, attn_version):
         "tversky_beta": tversky_beta,
         "focal_gamma": focal_gamma,
         "final_metrics_must_be_online": args.wandb_require_final_metrics,
+        "positive_label_rule": "target > 0",
+        "threshold_comparator": "probability >= threshold",
+        "training_protocol": selection_protocol,
+        "pretrained": startup_provenance["pretrained"],
+        "label_diagnostics": startup_provenance["label_diagnostics"],
     }
     if args.run_manifest:
         config_payload["run_manifest_path"] = str(Path(args.run_manifest).expanduser().resolve())
@@ -419,10 +473,29 @@ def wandb_config(model_name, num_heads, hidden_size, batch_size, attn_version):
             "seed": SEED,
             "mode": args.wandb_mode,
             "final_metrics_must_be_online": args.wandb_require_final_metrics,
+            "startup_provenance_path": str(startup_provenance_path),
+            "training_protocol": selection_protocol,
+            "pretrained": startup_provenance["pretrained"],
         }
         wandb_run_record_path.write_text(
             json.dumps(run_record, indent=2, sort_keys=True) + '\n', encoding='utf-8'
         )
+    diagnostics_payload = {
+        "data/train_labels/valid_pixels": startup_provenance["label_diagnostics"]["train"]["valid_pixels"],
+        "data/train_labels/fire_pixels": startup_provenance["label_diagnostics"]["train"]["fire_pixels"],
+        "data/train_labels/nonunit_positive_pixels": startup_provenance["label_diagnostics"]["train"]["nonunit_positive_pixels"],
+        "data/train_labels/ignored_pixels": startup_provenance["label_diagnostics"]["train"]["ignored_pixels"],
+        "data/validation_labels/valid_pixels": startup_provenance["label_diagnostics"]["validation"]["valid_pixels"],
+        "data/validation_labels/fire_pixels": startup_provenance["label_diagnostics"]["validation"]["fire_pixels"],
+        "data/validation_labels/nonunit_positive_pixels": startup_provenance["label_diagnostics"]["validation"]["nonunit_positive_pixels"],
+        "data/validation_labels/ignored_pixels": startup_provenance["label_diagnostics"]["validation"]["ignored_pixels"],
+        "provenance/pretrained_loaded": int(startup_provenance["pretrained"]["loaded"]),
+        "provenance/pretrained_loaded_layers": startup_provenance["pretrained"]["loaded_layers"],
+        "provenance/pretrained_skipped_layers": startup_provenance["pretrained"]["skipped_layers"],
+        "protocol/checkpoint_after_epoch": checkpoint_after_epoch,
+        "protocol/early_stopping_after_epoch": early_stopping_after_epoch,
+    }
+    wandb_log_or_fail(diagnostics_payload, "startup provenance")
 
 
 def wandb_log_or_fail(payload, context):
@@ -619,7 +692,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
     for i, batch in enumerate(train_bar):
         # 1. 准备数据
         data_batch = batch['data'].to(device)
-        labels_batch = batch['labels'].to(torch.long).to(device)
+        labels_batch = batch['labels'].to(device)
 
         optimizer.zero_grad()
 
@@ -627,6 +700,15 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
             # 前向传播
             outputs = model(data_batch)
             loss, loss_dict = criterion(outputs, labels_batch)
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"Non-finite training loss at epoch {epoch}, batch {i}."
+                )
+            if float(loss.detach()) < -1e-7:
+                raise FloatingPointError(
+                    f"Negative training loss {float(loss.detach()):.8f} "
+                    f"at epoch {epoch}, batch {i}."
+                )
 
             # 转换 tensor 为 float
             for k in loss_dict:
@@ -660,17 +742,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
         current_loss = loss.item()
         lr_current = optimizer.param_groups[0]["lr"]
         
-        # Copy-Paste 渐进式概率
-        if epoch <= 20:
-            cp_prob_str = "0%"
-        elif epoch <= 40:
-            cp_prob_str = "20%"
-        elif epoch <= 60:
-            cp_prob_str = "40%"
-        elif epoch <= 80:
-            cp_prob_str = "50%"
-        else:
-            cp_prob_str = "60%"
+        cp_probability = getattr(dataloader.dataset, 'aug_probs', {}).get('copy_paste', 0.0)
+        cp_prob_str = f"{100.0 * float(cp_probability):.0f}%"
         
         train_bar.set_postfix({
             'loss': f'{current_loss:.4f}',
@@ -689,7 +762,15 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
 
 
 # ==================== 验证函数 ====================
-def validate(model, dataloader, criterion, device, post_trans, epoch, max_epochs):
+def validate(
+    model,
+    dataloader,
+    criterion,
+    device,
+    epoch,
+    max_epochs,
+    thresholds,
+):
     model.eval()
     val_loss = 0.0
     
@@ -700,9 +781,6 @@ def validate(model, dataloader, criterion, device, post_trans, epoch, max_epochs
     
     loss_components = {'tversky_loss': 0.0, 'focal_loss': 0.0, 'ce_loss': 0.0}
     
-    mean_iou = MeanIoU(include_background=False, reduction='mean')
-    mean_dice = DiceMetric(include_background=False, reduction='mean')
-
     val_bar = tqdm(dataloader, total=len(dataloader), desc=f"Validation Epoch {epoch}/{max_epochs}")
 
     all_probs = []
@@ -722,6 +800,15 @@ def validate(model, dataloader, criterion, device, post_trans, epoch, max_epochs
                 else:
                     val_outputs = outputs
                     loss, loss_dict = criterion(outputs, labels_batch)
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(
+                        f"Non-finite validation loss at epoch {epoch}, batch {i}."
+                    )
+                if float(loss.detach()) < -1e-7:
+                    raise FloatingPointError(
+                        f"Negative validation loss {float(loss.detach()):.8f} "
+                        f"at epoch {epoch}, batch {i}."
+                    )
 
             val_loss += loss.item() * data_batch.size(0)
             for key in loss_components:
@@ -729,7 +816,7 @@ def validate(model, dataloader, criterion, device, post_trans, epoch, max_epochs
                     loss_components[key] += loss_dict[key] * data_batch.size(0)
 
             probs = torch.softmax(val_outputs, dim=1)[:, 1, ...]
-            preds = (probs > 0.5).long()
+            preds = (probs >= 0.5).long()
             
             if labels_batch.shape[1] == 1:
                 targets = labels_batch.squeeze(1)
@@ -756,72 +843,27 @@ def validate(model, dataloader, criterion, device, post_trans, epoch, max_epochs
                 total_fn += fn
                 total_tn += tn
 
-            outputs_list = decollate_batch(val_outputs)
-            labels_binary = torch.clamp(labels_batch, 0, 1).long()
-            labels_binary_list = decollate_batch(labels_binary)
-            label_post_trans = Compose([AsDiscrete(to_onehot=2)])
-            labels_post = [label_post_trans(l) for l in labels_binary_list]
-            outputs_post = [post_trans(o) for o in outputs_list]
-            mean_iou(outputs_post, labels_post)
-            mean_dice(outputs_post, labels_post)
-
             val_bar.set_postfix({'loss': f'{loss.item():.4f}'})
 
     val_loss /= len(dataloader.dataset)
     for key in loss_components:
         loss_components[key] /= len(dataloader.dataset)
 
-    mean_iou_val = mean_iou.aggregate().item()
-    mean_dice_val = mean_dice.aggregate().item()
-    mean_iou.reset()
-    mean_dice.reset()
-
     epsilon = 1e-6
     precision = float(total_tp / (total_tp + total_fp + epsilon))
     recall = float(total_tp / (total_tp + total_fn + epsilon))
     f1 = float(2 * (precision * recall) / (precision + recall + epsilon))
     iou = float(total_tp / (total_tp + total_fp + total_fn + epsilon))
+    mean_iou_val = iou
+    mean_dice_val = f1
     
-    # 多阈值计算
-    thresholds = [0.2, 0.35, 0.5, 0.65, 0.8]
-    best_f1 = f1
-    best_threshold = 0.5
-    best_precision_val = precision
-    best_recall_val = recall
-    best_iou_val = iou
-    
-    # 合并所有概率和标签
-    if all_probs and all_targets:
-        all_probs_tensor = torch.cat(all_probs, dim=0)
-        all_targets_tensor = torch.cat(all_targets, dim=0)
-        
-        # 展平并应用有效掩码
-        probs_flat = all_probs_tensor.flatten()
-        targets_flat = all_targets_tensor.flatten()
-        valid_mask = (targets_flat != -1)
-        probs_valid = probs_flat[valid_mask]
-        targets_valid = targets_flat[valid_mask]
-        
-        if targets_valid.numel() > 0:
-            targets_binary = (targets_valid > 0).long()
-            
-            for threshold in thresholds:
-                preds_thresh = (probs_valid > threshold).long()
-                tp = (preds_thresh * targets_binary).sum().item()
-                fp = (preds_thresh * (1 - targets_binary)).sum().item()
-                fn = ((1 - preds_thresh) * targets_binary).sum().item()
-                
-                precision_thresh = tp / (tp + fp + epsilon)
-                recall_thresh = tp / (tp + fn + epsilon)
-                f1_thresh = 2 * (precision_thresh * recall_thresh) / (precision_thresh + recall_thresh + epsilon)
-                iou_thresh = tp / (tp + fp + fn + epsilon)
-                
-                if f1_thresh > best_f1:
-                    best_f1 = f1_thresh
-                    best_threshold = threshold
-                    best_precision_val = precision_thresh
-                    best_recall_val = recall_thresh
-                    best_iou_val = iou_thresh
+    if not all_probs or not all_targets:
+        raise RuntimeError("Validation produced no probability/target batches.")
+    selected = select_validation_threshold(
+        torch.cat(all_probs, dim=0).numpy(),
+        torch.cat(all_targets, dim=0).numpy(),
+        thresholds=thresholds,
+    )
     
     custom_metrics = {
         'precision': float(precision),
@@ -835,75 +877,45 @@ def validate(model, dataloader, criterion, device, post_trans, epoch, max_epochs
         'false_positive': int(total_fp),
         'false_negative': int(total_fn),
         'confusion_matrix': np.array([[total_tn, total_fp], [total_fn, total_tp]]),
-        'best_threshold': float(best_threshold),
-        'best_f1': float(best_f1),
-        'best_precision': float(best_precision_val),
-        'best_recall': float(best_recall_val),
-        'best_iou': float(best_iou_val),
+        'best_threshold': selected['threshold'],
+        'best_f1': selected['f1'],
+        'best_precision': selected['precision'],
+        'best_recall': selected['recall'],
+        'best_iou': selected['iou'],
+        'best_true_positive': selected['true_positive'],
+        'best_true_negative': selected['true_negative'],
+        'best_false_positive': selected['false_positive'],
+        'best_false_negative': selected['false_negative'],
+        'best_specificity': selected['specificity'],
+        'best_confusion_matrix': selected['confusion_matrix'],
     }
 
     return val_loss, loss_components, mean_iou_val, mean_dice_val, custom_metrics
 
 
-def find_optimal_threshold(model, dataloader, device):
-    """Compute optimal threshold by evaluating F1 over thresholds 0.2-0.8 (step 0.05) using all valid pixels."""
-    print(f"  - Calculating optimal threshold on {device} using all valid pixels...")
-    model.eval()
-    thresholds = np.arange(0.2, 0.801, 0.05)
-    tp_counts = np.zeros_like(thresholds, dtype=np.int64)
-    fp_counts = np.zeros_like(thresholds, dtype=np.int64)
-    fn_counts = np.zeros_like(thresholds, dtype=np.int64)
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Threshold Search", leave=False):
-            data = batch['data'].to(device)
-            labels = batch['labels'].to(device)
-            with autocast():
-                outputs = model(data)
-            if isinstance(outputs, (list, tuple)):
-                outputs = outputs[0]
-            probs = torch.softmax(outputs, dim=1)[:, 1, ...]
-            # Determine target tensor shape
-            targets = labels.squeeze(1) if labels.shape[1] == 1 else labels[:, 0, ...]
-            # Flatten and mask invalid pixels
-            probs_flat = probs.flatten()
-            targets_flat = targets.flatten()
-            valid_mask = (targets_flat != -1)
-            probs_valid = probs_flat[valid_mask]
-            targets_valid = (targets_flat[valid_mask] > 0).long()
-            if targets_valid.numel() == 0:
-                continue
-            probs_np = probs_valid.cpu().numpy()
-            targets_np = targets_valid.cpu().numpy()
-            for i, thr in enumerate(thresholds):
-                preds = (probs_np > thr).astype(np.int8)
-                tp_counts[i] += np.sum((preds == 1) & (targets_np == 1))
-                fp_counts[i] += np.sum((preds == 1) & (targets_np == 0))
-                fn_counts[i] += np.sum((preds == 0) & (targets_np == 1))
-    epsilon = 1e-6
-    f1_scores = 2 * tp_counts / (2 * tp_counts + fp_counts + fn_counts + epsilon)
-    best_idx = np.argmax(f1_scores)
-    best_thr = thresholds[best_idx]
-    best_f1 = f1_scores[best_idx]
-    print(f"  - Found best threshold: {best_thr:.2f} (F1: {best_f1:.4f})")
-    return best_thr, best_f1
-
-
-
-
-
-
 # ==================== 主训练循环 ====================
-# 初始化WandB
-wandb_config(model_name, num_heads, hidden_size, batch_size, attn_version)
-
-# 加载数据
+# 加载并核验数据
 print("Loading training data...")
-image_path = os.path.join(root_path, f'dataset_train/{mode}_train_img_seqtoseq_alll_{ts_length}i_{interval}.npy')
-label_path = os.path.join(root_path, f'dataset_train/{mode}_train_label_seqtoseq_alll_{ts_length}i_{interval}.npy')
-val_image_path = os.path.join(root_path, f'dataset_val/{mode}_val_img_seqtoseq_alll_{ts_length}i_{interval}.npy')
-val_label_path = os.path.join(root_path, f'dataset_val/{mode}_val_label_seqtoseq_alll_{ts_length}i_{interval}.npy')
-
 label_sel = 2 if mode == 'af' else 0
+label_diagnostics = {
+    'train': summarize_label_file(label_path, label_sel),
+    'validation': summarize_label_file(val_label_path, label_sel),
+}
+invalid_label_splits = [
+    split_name
+    for split_name, diagnostics in label_diagnostics.items()
+    if not diagnostics['contract_valid']
+]
+if invalid_label_splits:
+    raise ValueError(
+        'Invalid label values detected before training in: '
+        + ', '.join(invalid_label_splits)
+    )
+print(
+    "Label contract verified: -1=ignored, 0=background, >0=fire. "
+    f"Train non-unit positives={label_diagnostics['train']['nonunit_positive_pixels']}, "
+    f"validation non-unit positives={label_diagnostics['validation']['nonunit_positive_pixels']}."
+)
 
 train_dataset = FireDataset(
     image_path=image_path,
@@ -954,14 +966,69 @@ model = create_model(
 )
 
 count_parameters(model)
-pretrained_path = args.pretrained_path
-# [必须] 调用智能权重加载
-if pretrained_path and os.path.exists(pretrained_path) and hasattr(model, 'smart_load_weights'):
+pretrained_sha256 = sha256_file(pretrained_path) if pretrained_path else None
+pretrained_loaded = False
+pretrained_load_report = None
+if pretrained_path:
+    if not hasattr(model, 'smart_load_weights'):
+        raise RuntimeError(
+            f"Model {model_name} cannot load the configured pretrained checkpoint."
+        )
     print(f"- Loading pretrained weights from: {pretrained_path}")
-    model.smart_load_weights(pretrained_path)
+    pretrained_load_report = model.smart_load_weights(pretrained_path)
+    if (
+        not isinstance(pretrained_load_report, dict)
+        or pretrained_load_report.get('loaded_layers', 0) <= 0
+    ):
+        raise RuntimeError(
+            'Pretrained loading did not return a positive matched-layer count.'
+        )
+    pretrained_loaded = True
     print(f"- Successfully loaded pretrained weights for {model_name}")
 else:
-    print(f"- Warning: Pretrained weights not loaded. Path: {pretrained_path}")
+    print("- Random initialization explicitly enabled for this controlled ablation.")
+
+pretrained_record = {
+    'mode': 'checkpoint' if pretrained_path else 'random',
+    'path': pretrained_path,
+    'sha256': pretrained_sha256,
+    'loaded': pretrained_loaded,
+    'loaded_layers': (
+        pretrained_load_report.get('loaded_layers')
+        if pretrained_load_report is not None
+        else 0
+    ),
+    'skipped_layers': (
+        pretrained_load_report.get('skipped_layers')
+        if pretrained_load_report is not None
+        else 0
+    ),
+}
+if args.run_manifest:
+    with Path(args.run_manifest).expanduser().open(encoding='utf-8') as manifest_file:
+        launcher_manifest = json.load(manifest_file)
+    expected_pretrained = launcher_manifest.get('pretrained')
+    if expected_pretrained and (
+        expected_pretrained.get('mode') != pretrained_record['mode']
+        or expected_pretrained.get('path') != pretrained_record['path']
+        or expected_pretrained.get('sha256') != pretrained_record['sha256']
+    ):
+        raise RuntimeError(
+            'Runtime pretrained provenance does not match the launcher manifest.'
+        )
+
+startup_provenance = {
+    'positive_label_rule': 'target > 0',
+    'threshold_comparator': 'probability >= threshold',
+    'ignore_index': -1,
+    'training_protocol': selection_protocol,
+    'pretrained': pretrained_record,
+    'label_diagnostics': label_diagnostics,
+}
+startup_provenance_path.write_text(
+    json.dumps(startup_provenance, indent=2, sort_keys=True) + '\n',
+    encoding='utf-8',
+)
 
 count_parameters(model)
 
@@ -969,6 +1036,16 @@ count_parameters(model)
 model.to(device)
 
 print(f'Number of Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M')
+
+# Start W&B only after data and initialization provenance are verified.
+wandb_config(
+    model_name,
+    num_heads,
+    hidden_size,
+    batch_size,
+    attn_version,
+    startup_provenance,
+)
 
 # Correct masked two-class objective. CE-only is retained only as a controlled
 # Model-D comparator; all Hybrid-Loss variants use the corrected implementation.
@@ -1019,16 +1096,17 @@ else:
 
 scaler = GradScaler()
 
-post_trans = Compose([
-    Activations(softmax=True),
-    AsDiscrete(argmax=True, to_onehot=2)
-])
-
 early_stopping = EarlyStopping(patience=patience, min_delta=0.0001)
 
-# 保存最佳模型：基于 F1 score，只保存一个最佳模型
-best_f1 = 0.0
-best_model_path = None
+# Keep exactly one best checkpoint for this run.  The fixed path is atomically
+# overwritten only when an eligible epoch improves validation-selected F1.
+best_f1 = None
+best_checkpoint_saved = False
+best_checkpoint_updates = 0
+best_model_path = str(checkpoint_dir / (
+    f"best_model_{model_name}_run_{run}_seed_{SEED}_mode_{mode}_"
+    f"nh_{num_heads}_hs_{hidden_size}_bs_{batch_size}_av_{attn_version}.pth"
+))
 
 print("\n" + "="*50)
 print("Starting Training...")
@@ -1076,7 +1154,13 @@ for epoch in range(MAX_EPOCHS):
     
     # 验证
     val_loss, val_loss_components, mean_iou_val, mean_dice_val, custom_metrics = validate(
-        model, val_dataloader, criterion, device, post_trans, epoch + 1, MAX_EPOCHS
+        model,
+        val_dataloader,
+        criterion,
+        device,
+        epoch + 1,
+        MAX_EPOCHS,
+        validation_thresholds,
     )
     
     print(f"Validation Loss: {val_loss:.4f}")
@@ -1104,19 +1188,48 @@ for epoch in range(MAX_EPOCHS):
     print(f"  Best F1 Score: {custom_metrics['best_f1']:.4f}")
     print(f"  Best IoU: {custom_metrics['best_iou']:.4f}")
 
-    # 获取当前学习率
-    encoder_lr = decoder_lr = None
-    for param_group in optimizer.param_groups:
-        if 'encoder' in param_group.get('name', ''):
-            encoder_lr = param_group['lr']
-        elif 'decoder' in param_group.get('name', ''):
-            decoder_lr = param_group['lr']
+    if not scheduler_per_batch:
+        if scheduler_type == 'plateau':
+            scheduler.step(val_loss)
+        else:
+            scheduler.step()
+
+    # The optimizer has one unified group.  Record both boundaries because the
+    # cosine scheduler steps inside the batch loop and other schedulers step
+    # after validation.
+    unified_lr_end = optimizer.param_groups[0]["lr"]
+    selected_f1 = custom_metrics['best_f1']
+    epoch_number = epoch + 1
+    checkpoint_eligible = checkpoint_is_eligible(
+        epoch_number, checkpoint_after_epoch
+    )
+    early_stopping_enabled = early_stopping_is_enabled(
+        epoch_number, early_stopping_after_epoch
+    )
+    should_stop = early_stopping.update(
+        selected_f1, enabled=early_stopping_enabled
+    )
+    global_best_f1 = early_stopping.best_f1
+
+    if not early_stopping_enabled:
+        print(
+            f"  - Early stopping warm-up: epoch {epoch_number}/"
+            f"{early_stopping_after_epoch}; patience counter remains 0."
+        )
+    elif early_stopping.last_improved:
+        print(f"  - EarlyStopping improved (F1: {selected_f1:.4f}).")
+    else:
+        print(
+            f"  - EarlyStopping counter: {early_stopping.counter}/{patience} "
+            f"[F1: {selected_f1:.4f} vs best {early_stopping.best_f1:.4f}]"
+        )
 
     # 记录到WandB
     log_dict = {
         'epoch': epoch + 1,
-        'encoder_lr': encoder_lr,
-        'decoder_lr': decoder_lr,
+        'unified_lr': unified_lr_end,
+        'learning_rate/unified_start': unified_lr,
+        'learning_rate/unified_end': unified_lr_end,
         'train_loss': train_loss,
         'train_tversky_loss': train_loss_components['tversky_loss'],
         'train_focal_loss': train_loss_components['focal_loss'],
@@ -1138,7 +1251,11 @@ for epoch in range(MAX_EPOCHS):
         'val_best_precision': custom_metrics['best_precision'],
         'val_best_recall': custom_metrics['best_recall'],
         'val_best_iou': custom_metrics['best_iou'],
-        'global_best_f1': early_stopping.best_f1,
+        'global_best_f1': global_best_f1,
+        'validation/f1_at_fixed_0_5': custom_metrics['f1_score'],
+        'validation/iou_at_fixed_0_5': custom_metrics['iou'],
+        'validation/precision_at_fixed_0_5': custom_metrics['precision'],
+        'validation/recall_at_fixed_0_5': custom_metrics['recall'],
         # These names are the validation-selected quantities that later define
         # the frozen test protocol.  They are intentionally distinct from the
         # current-threshold diagnostics above.
@@ -1147,6 +1264,16 @@ for epoch in range(MAX_EPOCHS):
         'validation/iou_at_selected_threshold': custom_metrics['best_iou'],
         'validation/precision_at_selected_threshold': custom_metrics['best_precision'],
         'validation/recall_at_selected_threshold': custom_metrics['best_recall'],
+        'validation/specificity_at_selected_threshold': custom_metrics['best_specificity'],
+        'validation/tp_at_selected_threshold': custom_metrics['best_true_positive'],
+        'validation/tn_at_selected_threshold': custom_metrics['best_true_negative'],
+        'validation/fp_at_selected_threshold': custom_metrics['best_false_positive'],
+        'validation/fn_at_selected_threshold': custom_metrics['best_false_negative'],
+        'protocol/checkpoint_eligible': int(checkpoint_eligible),
+        'protocol/early_stopping_enabled': int(early_stopping_enabled),
+        'protocol/early_stopping_counter': early_stopping.counter,
+        'protocol/checkpoint_after_epoch': checkpoint_after_epoch,
+        'protocol/early_stopping_after_epoch': early_stopping_after_epoch,
     }
 
     # Persist every epoch locally before optional remote tracking.  This JSONL
@@ -1168,67 +1295,42 @@ for epoch in range(MAX_EPOCHS):
     with epoch_metrics_path.open('a', encoding='utf-8') as epoch_metrics_file:
         epoch_metrics_file.write(json.dumps(epoch_record, sort_keys=True) + '\n')
 
-    if not scheduler_per_batch:
-        if scheduler_type == 'plateau':
-            scheduler.step(val_loss)
-        else:
-            scheduler.step()
-    
     wandb_log_or_fail(log_dict, f'training epoch {epoch + 1}')
     
     # Cosine Scheduler 已在 train_one_epoch 中按 batch 更新
     # 打印当前学习率
     # 使用统一的学习率组，直接获取当前学习率
-    unified_lr = optimizer.param_groups[0]["lr"]
-    print(f"  - End of Epoch LR: {unified_lr:.2e}")
+    print(f"  - End of Epoch LR: {unified_lr_end:.2e}")
     
     # 保存混淆矩阵
     if (epoch + 1) % 10 == 0:
         metrics_calc = MetricsCalculator()
         cm_path = str(confusion_matrix_dir / f'cm_epoch_{epoch + 1}_seed_{SEED}.png')
         metrics_calc.plot_confusion_matrix(
-            custom_metrics['confusion_matrix'], 
+            custom_metrics['best_confusion_matrix'],
             cm_path, 
-            title=f'Confusion Matrix - Epoch {epoch + 1}'
+            title=(
+                f"Confusion Matrix - Epoch {epoch + 1} "
+                f"(threshold={custom_metrics['best_threshold']:.2f})"
+            )
         )
         wandb_log_or_fail({f'confusion_matrix_epoch_{epoch + 1}': wandb.Image(cm_path)},
                           f'confusion matrix at epoch {epoch + 1}')
     
-    # 保存最佳检查点（基于 F1 score，只保存一个最佳模型）
-    current_f1 = custom_metrics['f1_score']
+    # Save and early-stop on one consistent definition: validation F1 at the
+    # validation-selected threshold.  Fixed-0.5 metrics remain diagnostics only.
+    current_f1 = selected_f1
 
-    if current_f1 > best_f1 and epoch >= 30:
-        print(f"  - New best performance detected (F1: {current_f1:.4f}). Preparing to save...")
-
-        # Delete old best model if exists
-        if best_model_path and os.path.exists(best_model_path):
-            os.remove(best_model_path)
-            print(f"  - Removed old best model: {best_model_path}")
-
-        # Move model to CPU for threshold search to avoid GPU memory issues
-        model_cpu = model.module.cpu() if isinstance(model, nn.DataParallel) else model.cpu()
-
-        best_threshold, best_f1_optimized = find_optimal_threshold(
-            model_cpu, val_dataloader, torch.device('cpu')
+    if checkpoint_eligible and (best_f1 is None or current_f1 > best_f1):
+        print(
+            f"  - New best validation-selected performance detected "
+            f"(F1: {current_f1:.4f}, threshold: {custom_metrics['best_threshold']:.2f})."
         )
 
-        # Move model back to GPU
-        model_cpu.to(device)
-        if isinstance(model, nn.DataParallel):
-            model.module.to(device)
-        else:
-            model.to(device)
-
-        custom_metrics['best_threshold'] = best_threshold
-        custom_metrics['best_f1'] = best_f1_optimized
-
         best_f1 = current_f1
-        best_model_path = str(checkpoint_dir / (
-                    f"model_{model_name}_run_{run}_seed_{SEED}_mode_{mode}_"
-                    f"nh_{num_heads}_hs_{hidden_size}_bs_{batch_size}_av_{attn_version}_"
-                    f"epoch_{epoch + 1}_f1_{current_f1:.4f}_thr_{best_threshold:.2f}.pth"))
-
-        torch.save({
+        best_checkpoint_updates += 1
+        best_threshold = custom_metrics['best_threshold']
+        checkpoint_payload = {
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -1238,7 +1340,15 @@ for epoch in range(MAX_EPOCHS):
             'val_metrics': custom_metrics,
             'best_threshold': best_threshold,
             'f1_score': current_f1,
-        }, best_model_path)
+            'f1_at_fixed_0_5': custom_metrics['f1_score'],
+            'metric_definition': 'validation_f1_at_validation_selected_threshold',
+            'training_protocol': selection_protocol,
+            'checkpoint_update_count': best_checkpoint_updates,
+        }
+        temporary_checkpoint_path = best_model_path + '.tmp'
+        torch.save(checkpoint_payload, temporary_checkpoint_path)
+        os.replace(temporary_checkpoint_path, best_model_path)
+        best_checkpoint_saved = True
 
         checkpoint_record = {
             'selection/best_epoch': epoch + 1,
@@ -1247,22 +1357,34 @@ for epoch in range(MAX_EPOCHS):
             'selection/best_validation_iou': custom_metrics['best_iou'],
             'selection/best_validation_precision': custom_metrics['best_precision'],
             'selection/best_validation_recall': custom_metrics['best_recall'],
+            'selection/best_validation_specificity': custom_metrics['best_specificity'],
+            'selection/best_validation_tp': custom_metrics['best_true_positive'],
+            'selection/best_validation_tn': custom_metrics['best_true_negative'],
+            'selection/best_validation_fp': custom_metrics['best_false_positive'],
+            'selection/best_validation_fn': custom_metrics['best_false_negative'],
+            'selection/f1_at_fixed_0_5': custom_metrics['f1_score'],
+            'selection/metric_definition': 'validation_f1_at_validation_selected_threshold',
+            'selection/checkpoint_update_count': best_checkpoint_updates,
+            'selection/checkpoint_after_epoch': checkpoint_after_epoch,
+            'selection/early_stopping_after_epoch': early_stopping_after_epoch,
             'selection/checkpoint_path': best_model_path,
         }
         wandb_log_or_fail(checkpoint_record, f'checkpoint selection at epoch {epoch + 1}')
 
-        print(f"  - Saved best model: {best_model_path}")
-        print(f"  - F1 Score: {current_f1:.4f}, Best Threshold: {best_threshold:.2f}")
+        print(f"  - Overwrote the single retained best model: {best_model_path}")
+        print(
+            f"  - Selected F1: {current_f1:.4f}, "
+            f"frozen threshold: {best_threshold:.2f}"
+        )
     
-    # 早停检查（只监控 F1）
-    if early_stopping(custom_metrics['f1_score']):
+    if should_stop:
         print(f"\nEarly stopping at epoch {epoch + 1}")
         break
 
 print("\n" + "="*50)
 print("Training Completed!")
 print("="*50)
-if best_model_path:
+if best_checkpoint_saved:
     print(f"\nBest model saved at: {best_model_path}")
     print(f"Best F1 Score: {best_f1:.4f}")
 

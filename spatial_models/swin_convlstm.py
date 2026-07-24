@@ -354,9 +354,10 @@ class SwinConvLSTM(nn.Module):
 
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        except FileNotFoundError:
-            print(f" Error: Pretrained path not found: {checkpoint_path}")
-            return
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Pretrained path not found: {checkpoint_path}"
+            ) from exc
 
         if 'state_dict' in checkpoint:
             state_dict = checkpoint['state_dict']
@@ -432,6 +433,15 @@ class SwinConvLSTM(nn.Module):
                 skipped_count += 1
 
         # 9. 更新模型
+        if loaded_count == 0:
+            raise RuntimeError(
+                "The pretrained checkpoint matched zero model layers; "
+                "refusing to continue with silent random initialization."
+            )
         model_dict.update(new_state_dict)
         self.load_state_dict(model_dict)
         print(f" - Successfully loaded {loaded_count} layers, skipped {skipped_count} layers.")
+        return {
+            'loaded_layers': loaded_count,
+            'skipped_layers': skipped_count,
+        }

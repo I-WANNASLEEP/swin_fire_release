@@ -35,15 +35,18 @@ loss:
     - {alpha: 0.5, beta: 0.5}
     - {alpha: 0.4, beta: 0.6}
     - {alpha: 0.3, beta: 0.7}
-selection_policy: choose alpha/beta and threshold from validation only, then freeze before test
+selection_policy: choose alpha/beta on validation; select F1 only across thresholds [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65], then freeze before test
 training:
   batch_size: 1
-  learning_rate: 0.0001
+  learning_rate: 0.0002
   num_heads: 4
   sequence_length: 10
   interval: 3
   max_epochs: 100
   patience: 15
+  checkpoint_after_epoch: 50
+  early_stopping_after_epoch: 100
+  validation_thresholds: [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65]
   grad_clip: 1.0
   scheduler: cosine_restart_decay
   wandb:
