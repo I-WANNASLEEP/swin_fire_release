@@ -184,6 +184,9 @@ def main() -> None:
     parser.add_argument("--override-output-root", default=None, help="Override experiment.output_root in config.")
     parser.add_argument("--override-tversky-alpha", type=float, default=None, help="Override loss.alpha in config.")
     parser.add_argument("--override-tversky-beta", type=float, default=None, help="Override loss.beta in config.")
+    parser.add_argument("--override-max-epochs", type=int, default=None, help="Override training.max_epochs in config.")
+    parser.add_argument("--override-batch-size", type=int, default=None, help="Override training.batch_size in config.")
+    parser.add_argument("--override-checkpoint-after-epoch", type=int, default=None, help="Override training.checkpoint_after_epoch in config.")
     parser.add_argument("--no-copy-paste", action="store_true", help="Disable copy-paste augmentation (for Model B/C/D).")
     args = parser.parse_args()
     if args.check == args.execute:
@@ -206,6 +209,14 @@ def main() -> None:
         config.setdefault("loss", {})["alpha"] = args.override_tversky_alpha
     if args.override_tversky_beta is not None:
         config.setdefault("loss", {})["beta"] = args.override_tversky_beta
+    if args.override_max_epochs is not None:
+        config.setdefault("training", {})["max_epochs"] = args.override_max_epochs
+        if "checkpoint_after_epoch" in config.get("training", {}):
+            cap = args.override_max_epochs - 1
+            if config["training"]["checkpoint_after_epoch"] > cap:
+                config["training"]["checkpoint_after_epoch"] = min(cap, 20)
+    if args.override_batch_size is not None:
+        config.setdefault("training", {})["batch_size"] = args.override_batch_size
 
     experiment = config.get("experiment", {})
     seeds = experiment.get("seeds", [])
@@ -267,7 +278,7 @@ def main() -> None:
         else Path(pretrained_record["path"])
     )
     run_dir = PROJECT_ROOT / experiment["output_root"] / f"seed_{args.seed}"
-    run_dir.mkdir(parents=True, exist_ok=False)
+    run_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "config": str(config_path), "config_sha256": sha256(config_path), "seed": args.seed,
         "data_root": str(data_root),

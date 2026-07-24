@@ -927,6 +927,7 @@ train_dataset = FireDataset(
     is_train=True,
     crop_size=224,
     enable_copy_paste=not args.no_copy_paste,
+    preload=True,
 )
 print(f"训练集样本数: {len(train_dataset)}")
 print(f"原始图像文件总样本数: {np.load(image_path, mmap_mode='r').shape[0]}")
@@ -936,8 +937,10 @@ train_dataloader = DataLoader(
     train_dataset,
     batch_size=batch_size,
     shuffle=True,
-    num_workers=8,
-    pin_memory=True
+    num_workers=16,
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=4,
 )
 val_dataset = FireDataset(
     image_path=val_image_path,
@@ -948,13 +951,15 @@ val_dataset = FireDataset(
     label_sel=label_sel,
     is_train=False,
     crop_size=256,
+    preload=True,
 )
 val_dataloader = DataLoader(
     val_dataset,
     batch_size=batch_size,
     shuffle=False,
-    num_workers=8,
-    pin_memory=True
+    num_workers=4,
+    pin_memory=True,
+    persistent_workers=True,
 )
 
 print("Creating model...")

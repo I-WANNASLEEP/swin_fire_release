@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PYTHON="/home/congwei/miniconda3/envs/ts-satfire-fixed/bin/python"
+PYTHON="${PYTHON:-python}"
 
 export TS_SATFIRE_DATA_ROOT="${TS_SATFIRE_DATA_ROOT:-}"
 export SWIN_PRETRAINED_PATH="${SWIN_PRETRAINED_PATH:-}"
@@ -33,6 +33,7 @@ for seed in "${SEEDS[@]}"; do
         --config configs/full_model.yaml \
         --seed "$seed" \
         --override-output-root "${BASE_OUTPUT}/model_a_full" \
+        --override-max-epochs 30 \
         --execute
 done
 
@@ -46,6 +47,7 @@ for seed in "${SEEDS[@]}"; do
         --seed "$seed" \
         --override-output-root "${BASE_OUTPUT}/model_b_no_copy_paste" \
         --no-copy-paste \
+        --override-max-epochs 30 \
         --execute
 done
 
@@ -60,6 +62,7 @@ for seed in "${SEEDS[@]}"; do
         --override-scheduler step \
         --override-output-root "${BASE_OUTPUT}/model_c_step_scheduler" \
         --no-copy-paste \
+        --override-max-epochs 30 \
         --execute
 done
 
@@ -75,6 +78,7 @@ for seed in "${SEEDS[@]}"; do
         --override-loss-type masked_cross_entropy \
         --override-output-root "${BASE_OUTPUT}/model_d_ce_only" \
         --no-copy-paste \
+        --override-max-epochs 30 \
         --execute
 done
 

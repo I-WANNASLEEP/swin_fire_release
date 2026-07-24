@@ -7,7 +7,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PYTHON="/home/congwei/miniconda3/envs/ts-satfire-fixed/bin/python"
+PYTHON="${PYTHON:-python}"
 
 export TS_SATFIRE_DATA_ROOT="${TS_SATFIRE_DATA_ROOT:-}"
 export SWIN_PRETRAINED_PATH="${SWIN_PRETRAINED_PATH:-}"
@@ -35,6 +35,7 @@ for attn in "${ATTENTIONS[@]}"; do
             --seed "$seed" \
             --override-attention "$attn" \
             --override-output-root "results/training_runs/attention_ablation_corrected_loss" \
+            --override-max-epochs 30 \
             --execute
         echo "=== Done: $attn / seed $seed ==="
     done

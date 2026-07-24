@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PYTHON="/home/congwei/miniconda3/envs/ts-satfire-fixed/bin/python"
+PYTHON="${PYTHON:-python}"
 
 export TS_SATFIRE_DATA_ROOT="${TS_SATFIRE_DATA_ROOT:-}"
 export SWIN_PRETRAINED_PATH="${SWIN_PRETRAINED_PATH:-}"
@@ -27,9 +27,10 @@ BASE_OUTPUT="results/training_runs/tversky_grid_search"
 # (0.4, 0.6): moderate recall emphasis  
 # (0.3, 0.7): strong recall emphasis (penalize missed fires)
 CANDIDATES=(
-    "0.5 0.5"
+    # "0.5 0.5"  # done
+    "0.45 0.55"
     "0.4 0.6"
-    "0.3 0.7"
+    # "0.3 0.7"
 )
 
 echo "=================================="
@@ -56,6 +57,7 @@ for candidate in "${CANDIDATES[@]}"; do
             --seed "$seed" \
             --override-tversky-alpha "$alpha" \
             --override-tversky-beta "$beta" \
+            --override-max-epochs 30 \
             --override-output-root "${BASE_OUTPUT}/${variant_name}" \
             --execute
         echo "  Done seed $seed"

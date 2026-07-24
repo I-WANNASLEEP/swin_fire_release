@@ -6,13 +6,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PYTHON="/home/congwei/miniconda3/envs/ts-satfire-fixed/bin/python"
+PYTHON="${PYTHON:-python}"
 
 export TS_SATFIRE_DATA_ROOT="${TS_SATFIRE_DATA_ROOT:-}"
 export SWIN_PRETRAINED_PATH="${SWIN_PRETRAINED_PATH:-}"
 export SAMPLE_MANIFEST="${SAMPLE_MANIFEST:-}"
 
-SEEDS=(41 42 43 44 45)
+SEEDS=(42)
 BASE_OUTPUT="results/training_runs/architecture_baselines_corrected_protocol"
 
 echo "=================================="
@@ -30,7 +30,7 @@ for model_name in swinunetr3d unet3d; do
         echo ""
         echo "=== Model: $model_name | Seed: $seed (run $run_index) ==="
         "$PYTHON" train_models_spatial_temp.py \
-            -m "$model_name" -mode af -b 1 \
+            -m "$model_name" -mode af -b 4 \
             -r "$run_index" -lr 0.0001 -av none \
             -nh 4 -ed 96 -nc 8 -ts 10 -it 3 \
             --max-epochs 100 -patience 15 -grad_clip 1.0 \

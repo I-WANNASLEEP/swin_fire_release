@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PYTHON="/home/congwei/miniconda3/envs/ts-satfire-fixed/bin/python"
+PYTHON="${PYTHON:-python}"
 
 export TS_SATFIRE_DATA_ROOT="${TS_SATFIRE_DATA_ROOT:-}"
 export SWIN_PRETRAINED_PATH="${SWIN_PRETRAINED_PATH:-}"
@@ -28,6 +28,7 @@ for seed in 41 42 43 44 45; do
     "$PYTHON" scripts/train.py \
         --config configs/full_model.yaml \
         --seed "$seed" \
+        --override-max-epochs 30 \
         --execute
     echo "--- Seed $seed completed ---"
 done

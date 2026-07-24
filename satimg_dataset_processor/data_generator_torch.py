@@ -45,9 +45,14 @@ class FireDataset(Dataset):
         dilation_grow_epochs=80,
         use_random_dilation=False,
         enable_copy_paste=True,
+        preload=False,
     ):
-        self.images = np.load(image_path, mmap_mode='r')
-        self.labels = np.load(label_path, mmap_mode='r')
+        if preload:
+            self.images = np.load(image_path)
+            self.labels = np.load(label_path)
+        else:
+            self.images = np.load(image_path, mmap_mode='r')
+            self.labels = np.load(label_path, mmap_mode='r')
         self.ts_length = ts_length
         self.transform = transform
         self.n_channel = n_channel
