@@ -175,7 +175,7 @@ class SwinTransformerBlock(nn.Module):
     def forward(self, x, mask_matrix, temp_attn_mask):
         shortcut = x
         if self.use_checkpoint:
-            x = checkpoint.checkpoint(self.forward_part1, x, mask_matrix)
+            x = checkpoint.checkpoint(self.forward_part1, x, mask_matrix, temp_attn_mask, use_reentrant=False)
         else:
             x = self.forward_part1(x, mask_matrix, temp_attn_mask)
         x = shortcut + self.drop_path(x)

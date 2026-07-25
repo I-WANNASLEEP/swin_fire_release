@@ -182,6 +182,7 @@ parser.add_argument('-epoch', '--max-epochs', dest='max_epochs', type=int, defau
 parser.add_argument('-patience', type=int, default=15, help='Early stopping patience')
 parser.add_argument('-grad_clip', type=float, default=1.0, help='Gradient clipping max norm')
 parser.add_argument('-scheduler', type=str, default='cosine_restart_decay', choices=['cosine', 'cosine_restart_decay', 'plateau', 'step'], help='Learning-rate scheduler')
+parser.add_argument('--warmup-epochs', type=int, default=0, help='Linear LR warmup epochs (0=disabled)')
 parser.add_argument('-decay_factor', type=float, default=0.99, help='Decay factor for LR peak after each restart (default 0.99)')
 parser.add_argument('-tversky_alpha', type=float, default=0.5, help='Tversky false-positive weight; select on validation only')
 parser.add_argument('-tversky_beta', type=float, default=0.5, help='Tversky false-negative weight; select on validation only')
