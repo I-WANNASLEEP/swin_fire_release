@@ -1005,16 +1005,7 @@ if pretrained_path:
     pretrained_loaded = True
     print(f"- Successfully loaded pretrained weights for {model_name}")
 else:
-    print("- Random initialization explicitly enabled for this controlled ablation.")
-    print("- Breaking all default (kaiming/xavier) initialization — re-randomizing every parameter.")
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if param.ndim >= 2:
-                param.normal_(mean=0.0, std=0.02)
-            elif param.ndim == 1:
-                param.zero_()
-            else:
-                param.uniform_(-0.02, 0.02)
+    print("- Random initialization explicitly enabled for this controlled ablation (PyTorch default kaiming).")
 
 pretrained_record = {
     'mode': 'checkpoint' if pretrained_path else 'random',
