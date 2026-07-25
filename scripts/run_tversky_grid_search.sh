@@ -27,9 +27,9 @@ BASE_OUTPUT="results/training_runs/tversky_grid_search"
 # (0.4, 0.6): moderate recall emphasis  
 # (0.3, 0.7): strong recall emphasis (penalize missed fires)
 CANDIDATES=(
-    "0.4 0.6"
-    "0.45 0.55"
-    "0.6 0.4"
+
+    "0.55 0.45"
+
 )
 
 echo "=================================="

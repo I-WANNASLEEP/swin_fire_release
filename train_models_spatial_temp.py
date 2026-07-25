@@ -5,6 +5,7 @@ import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
+import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -260,12 +261,13 @@ if MAX_EPOCHS <= checkpoint_after_epoch:
 # ==================== 设置随机种子 ====================
 SEED = run + 41
 print(f"Random Seed: {SEED}")
+random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = False
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 if not args.data_root:
     parser.error('--data-root or TS_SATFIRE_DATA_ROOT is required; source edits are not supported.')
@@ -934,6 +936,14 @@ print(f"训练集样本数: {len(train_dataset)}")
 print(f"原始图像文件总样本数: {np.load(image_path, mmap_mode='r').shape[0]}")
 print(f"原始标签文件总样本数: {np.load(label_path, mmap_mode='r').shape[0]}")
 
+def _worker_init_fn(worker_id):
+    worker_seed = SEED + worker_id
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+_dl_generator = torch.Generator()
+_dl_generator.manual_seed(SEED)
+
 train_dataloader = DataLoader(
     train_dataset,
     batch_size=batch_size,
@@ -942,6 +952,8 @@ train_dataloader = DataLoader(
     pin_memory=True,
     persistent_workers=True,
     prefetch_factor=4,
+    worker_init_fn=_worker_init_fn,
+    generator=_dl_generator,
 )
 val_dataset = FireDataset(
     image_path=val_image_path,
@@ -961,6 +973,7 @@ val_dataloader = DataLoader(
     num_workers=4,
     pin_memory=True,
     persistent_workers=True,
+    worker_init_fn=_worker_init_fn,
 )
 
 print("Creating model...")
@@ -1120,7 +1133,13 @@ print("="*50 + "\n")
 
 # 训练循环
 for epoch in range(MAX_EPOCHS):
-    # Update Copy-Paste probability based on epoch
+    epoch_seed = SEED + epoch
+    random.seed(epoch_seed)
+    np.random.seed(epoch_seed)
+    torch.manual_seed(epoch_seed)
+    torch.cuda.manual_seed(epoch_seed)
+    torch.cuda.manual_seed_all(epoch_seed)
+
     train_dataset.set_epoch(epoch + 1)
     val_dataset.set_epoch(epoch + 1)
 
