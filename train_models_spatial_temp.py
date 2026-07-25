@@ -1144,6 +1144,36 @@ if args.loss_type == 'masked_hybrid':
 else:
     criterion = MaskedCrossEntropyLoss()
 
+# Epoch-0 validation audit (random init only, terminal output, no W&B upload)
+if not pretrained_path:
+    print("\n" + "=" * 50)
+    print("Epoch 0 Validation Audit (before any training)")
+    print("=" * 50)
+    try:
+        val0_loss, val0_components, val0_iou, val0_dice, val0_metrics = validate(
+            model, val_dataloader, criterion, device, 0, MAX_EPOCHS, validation_thresholds,
+        )
+        print(f"Validation Loss: {val0_loss:.4f}")
+        print(f"  - Tversky: {val0_components['tversky_loss']:.4f}")
+        print(f"  - Focal: {val0_components['focal_loss']:.4f}")
+        print(f"  - CE: {val0_components['ce_loss']:.4f}")
+        print(f"Mean IoU: {val0_iou:.4f}, Mean Dice: {val0_dice:.4f}")
+        print(f"\nValidation Metrics:")
+        print(f"  Precision: {val0_metrics['precision']:.4f}")
+        print(f"  Recall: {val0_metrics['recall']:.4f}")
+        print(f"  F1 Score: {val0_metrics['f1_score']:.4f}")
+        print(f"  IoU: {val0_metrics['iou']:.4f}")
+        print(f"  Specificity: {val0_metrics['specificity']:.4f}")
+        print(f"  TP: {val0_metrics['true_positive']}, TN: {val0_metrics['true_negative']}")
+        print(f"  FP: {val0_metrics['false_positive']}, FN: {val0_metrics['false_negative']}")
+        print(f"\nBest Threshold Results:")
+        print(f"  Best Threshold: {val0_metrics['best_threshold']:.2f}")
+        print(f"  Best F1 Score: {val0_metrics['best_f1']:.4f}")
+        print(f"  Best IoU: {val0_metrics['best_iou']:.4f}")
+    except Exception as exc:
+        print(f"Epoch 0 validation skipped (non-critical): {exc}")
+    print("=" * 50 + "\n")
+
 # Use unified learning rate parameter groups
 param_groups = get_unified_lr_groups(model, lr)
 optimizer = optim.AdamW(

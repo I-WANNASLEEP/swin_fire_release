@@ -195,6 +195,7 @@ def main() -> None:
     parser.add_argument("--override-max-epochs", type=int, default=None, help="Override training.max_epochs in config.")
     parser.add_argument("--override-batch-size", type=int, default=None, help="Override training.batch_size in config.")
     parser.add_argument("--override-checkpoint-after-epoch", type=int, default=None, help="Override training.checkpoint_after_epoch in config.")
+    parser.add_argument("--override-lr", type=float, default=None, help="Override training.learning_rate in config.")
     parser.add_argument("--no-copy-paste", action="store_true", help="Disable copy-paste augmentation (for Model B/C/D).")
     args = parser.parse_args()
     if args.check == args.execute:
@@ -225,6 +226,8 @@ def main() -> None:
                 config["training"]["checkpoint_after_epoch"] = min(cap, 20)
     if args.override_batch_size is not None:
         config.setdefault("training", {})["batch_size"] = args.override_batch_size
+    if args.override_lr is not None:
+        config.setdefault("training", {})["learning_rate"] = args.override_lr
 
     experiment = config.get("experiment", {})
     seeds = experiment.get("seeds", [])
