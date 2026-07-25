@@ -295,7 +295,7 @@ if missing_data_files:
 
 pretrained_path = (
     os.path.abspath(os.path.expanduser(args.pretrained_path))
-    if args.pretrained_path
+    if args.pretrained_path and not args.allow_random_init
     else None
 )
 if pretrained_path and not os.path.isfile(pretrained_path):
@@ -1006,6 +1006,15 @@ if pretrained_path:
     print(f"- Successfully loaded pretrained weights for {model_name}")
 else:
     print("- Random initialization explicitly enabled for this controlled ablation.")
+    print("- Breaking all default (kaiming/xavier) initialization — re-randomizing every parameter.")
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if param.ndim >= 2:
+                param.normal_(mean=0.0, std=0.02)
+            elif param.ndim == 1:
+                param.zero_()
+            else:
+                param.uniform_(-0.02, 0.02)
 
 pretrained_record = {
     'mode': 'checkpoint' if pretrained_path else 'random',

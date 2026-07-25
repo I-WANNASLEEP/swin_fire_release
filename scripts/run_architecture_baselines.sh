@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# ============================================================================
 # Architecture Baselines: swin_convlstm, swinunetr3d, unet3d × 5 seeds each
-# ============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
 PYTHON="${PYTHON:-python}"
+
+
+
 
 export TS_SATFIRE_DATA_ROOT="${TS_SATFIRE_DATA_ROOT:-}"
 export SWIN_PRETRAINED_PATH="${SWIN_PRETRAINED_PATH:-}"
@@ -15,9 +17,7 @@ export SAMPLE_MANIFEST="${SAMPLE_MANIFEST:-}"
 SEEDS=(42)
 BASE_OUTPUT="results/training_runs/architecture_baselines_corrected_protocol"
 
-echo "=================================="
 echo "Architecture Baselines"
-echo "=================================="
 
 # Note: swinunetr3d and unet3d use the legacy trainer with different model names.
 # They are launched directly via train_models_spatial_temp.py
@@ -36,7 +36,7 @@ for model_name in swinunetr3d unet3d; do
             --max-epochs 100 -patience 15 -grad_clip 1.0 \
             -scheduler cosine_restart_decay \
             --data-root "$TS_SATFIRE_DATA_ROOT" \
-            --pretrained-path "" \
+            --pretrained-path "" --allow-random-init --allow-random-init \
             --output-dir "$run_dir" \
             --loss-type masked_hybrid \
             --wandb-mode online \

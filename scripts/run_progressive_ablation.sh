@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# ============================================================================
 # Progressive Ablation: Models A, B, C, D × 5 seeds each
 #
 # Model A: Full model (DCBAM, copy-paste, cosine_restart_decay, masked_hybrid)
 # Model B: No copy-paste (DCBAM, cosine_restart_decay, masked_hybrid)
 # Model C: No copy-paste + step scheduler (DCBAM, step, masked_hybrid)
 # Model D: CE-only (DCBAM, step, masked_cross_entropy, no copy-paste)
-# ============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
 PYTHON="${PYTHON:-python}"
+
+
+
 
 export TS_SATFIRE_DATA_ROOT="${TS_SATFIRE_DATA_ROOT:-}"
 export SWIN_PRETRAINED_PATH="${SWIN_PRETRAINED_PATH:-}"
@@ -20,9 +22,7 @@ export SAMPLE_MANIFEST="${SAMPLE_MANIFEST:-}"
 SEEDS=(41 42 43 44 45)
 BASE_OUTPUT="results/training_runs/progressive_ablation_corrected_protocol"
 
-echo "=================================="
 echo "Progressive Ablation (Models A-D)"
-echo "=================================="
 
 # Model A: Full model
 echo ""
