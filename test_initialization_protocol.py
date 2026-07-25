@@ -29,6 +29,16 @@ class TinySegmentationModel(nn.Module):
         )
 
 
+class NonFiniteBufferModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 4)
+        self.register_buffer(
+            "relative_coordinates",
+            torch.tensor([0.0, float("nan")]),
+        )
+
+
 class InitializationProtocolTest(unittest.TestCase):
     def test_initialization_ablation_config_forbids_blanket_override(self) -> None:
         path = Path(__file__).resolve().parent / "configs" / "initialization_ablation.yaml"
@@ -105,6 +115,17 @@ class InitializationProtocolTest(unittest.TestCase):
             model.seg_head[0].weight[0, 0, 0, 0] = float("nan")
 
         with self.assertRaisesRegex(RuntimeError, "Non-finite parameters"):
+            audit_model_initialization(
+                model,
+                strategy="module_native_defaults",
+            )
+
+    def test_nonfinite_floating_buffer_is_rejected(self) -> None:
+        model = NonFiniteBufferModel()
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Non-finite floating-point buffers",
+        ):
             audit_model_initialization(
                 model,
                 strategy="module_native_defaults",

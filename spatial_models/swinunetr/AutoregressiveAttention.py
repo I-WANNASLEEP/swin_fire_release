@@ -60,9 +60,10 @@ class AutoregressiveAttention(nn.Module):
             else:
                 relative_coords_table = torch.stack(torch.meshgrid(relative_coords_d, relative_coords_h, relative_coords_w))
             relative_coords_table = relative_coords_table.permute(1, 2, 3, 0).contiguous().unsqueeze(0)
-            relative_coords_table[:, :, :, 0] /= (self.window_size[0] - 1)
-            relative_coords_table[:, :, :, 1] /= (self.window_size[1] - 1)
-            relative_coords_table[:, :, :, 2] /= (self.window_size[2] - 1)
+            # Singleton axes have only zero relative displacement.  A unit
+            # denominator preserves that value and avoids NaN at construction.
+            for axis, size in enumerate(self.window_size):
+                relative_coords_table[..., axis] /= max(int(size) - 1, 1)
 
             # get pair-wise relative position index for each token inside the window
             coords_d = torch.arange(self.window_size[0])
@@ -91,8 +92,8 @@ class AutoregressiveAttention(nn.Module):
             else:
                 relative_coords_table = torch.stack(torch.meshgrid(relative_coords_h, relative_coords_w))
             relative_coords_table = relative_coords_table.permute(1, 2, 0).contiguous().unsqueeze(0)
-            relative_coords_table[:, :, :, 0] /= (self.window_size[0] - 1)
-            relative_coords_table[:, :, :, 1] /= (self.window_size[1] - 1)
+            for axis, size in enumerate(self.window_size):
+                relative_coords_table[..., axis] /= max(int(size) - 1, 1)
 
             # get pair-wise relative position index for each token inside the window
             coords_h = torch.arange(self.window_size[0])

@@ -243,6 +243,12 @@ mode = args.mode
 patience = args.patience
 grad_clip_max_norm = args.grad_clip
 scheduler_type = args.scheduler
+
+if model_name == 'swinunetr3d' and attn_version not in ('v1', 'v2', 'ar'):
+    parser.error(
+        "swinunetr3d requires an explicit -av value from: v1, v2, ar. "
+        "The architecture-baseline protocol uses v2."
+    )
 tversky_alpha = args.tversky_alpha
 tversky_beta = args.tversky_beta
 focal_gamma = args.focal_gamma
@@ -373,7 +379,7 @@ class MetricsCalculator:
         metrics = {
             'precision': precision,
             'recall': recall,
-            'f1_score': f1_score,
+            'f1_score': f1,
             'iou': iou,
             'specificity': specificity,
             'sensitivity': sensitivity,
@@ -463,7 +469,7 @@ def wandb_config(
         job_type="training",
         config=config_payload,
     )
-    run.name = (f'nh_{num_heads}_hs_{hidden_size}_bs_{batch_size}_'
+    run.name = (f'{model_name}_nh_{num_heads}_hs_{hidden_size}_bs_{batch_size}_'
                 f'attn_{attn_version}_seed_{SEED}_scheduler_{scheduler_type}')
     wandb.define_metric("epoch")
     wandb.define_metric("val_f1_score", step_metric="epoch", summary="max")
@@ -508,6 +514,12 @@ def wandb_config(
         "provenance/normalization_scales_checked": startup_provenance[
             "initialization"
         ]["audit"]["affine_normalization_scales_checked"],
+        "provenance/floating_buffer_tensors_checked": startup_provenance[
+            "initialization"
+        ]["audit"]["floating_buffer_tensors_checked"],
+        "provenance/floating_buffer_values_checked": startup_provenance[
+            "initialization"
+        ]["audit"]["floating_buffer_values_checked"],
         "provenance/segmentation_head_gradient_checked": int(
             startup_provenance["initialization"]["audit"]["segmentation_head"][
                 "checked"
@@ -584,6 +596,7 @@ def create_model(model_name, n_channel, num_classes, hidden_size, num_heads,
             norm_name='batch',
             drop_rate=0.1,
             attn_drop_rate=0.1,
+            attn_version=attn_version,
             spatial_dims=3,
             use_checkpoint=True,
         )
@@ -675,6 +688,44 @@ def update_freeze_status_all_trainable(model, epoch):
     return False
 
 
+def _primary_logits(outputs):
+    if isinstance(outputs, (list, tuple)):
+        if not outputs:
+            raise ValueError("Model returned an empty output sequence.")
+        return outputs[0]
+    return outputs
+
+
+def _assert_finite_tensor(tensor, *, tensor_name, epoch, batch_index):
+    if bool(torch.isfinite(tensor).all()):
+        return
+    nonfinite_count = int((~torch.isfinite(tensor)).sum().detach().cpu())
+    raise FloatingPointError(
+        f"Non-finite {tensor_name} at epoch {epoch}, batch {batch_index}: "
+        f"{nonfinite_count}/{tensor.numel()} values are NaN or infinite."
+    )
+
+
+def _assert_output_target_alignment(logits, targets, *, epoch, batch_index):
+    if logits.ndim < 3 or logits.shape[1] != 2:
+        raise ValueError(
+            f"Expected two-class logits [B, 2, ...] at epoch {epoch}, "
+            f"batch {batch_index}; received {tuple(logits.shape)}."
+        )
+    target_spatial_shape = (
+        tuple(targets.shape[2:])
+        if targets.ndim == logits.ndim and targets.shape[1] == 1
+        else tuple(targets.shape[1:])
+    )
+    expected_shape = (targets.shape[0], *target_spatial_shape)
+    actual_shape = (logits.shape[0], *logits.shape[2:])
+    if actual_shape != expected_shape:
+        raise ValueError(
+            f"Output/target shape mismatch at epoch {epoch}, batch {batch_index}: "
+            f"logits={tuple(logits.shape)}, targets={tuple(targets.shape)}."
+        )
+
+
 # ==================== 训练函数 ====================
 def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
                     grad_clip_max_norm, epoch, max_epochs, scheduler=None):
@@ -711,6 +762,11 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
         'ce_loss': 0.0,
     }
     total_loss = 0.0
+    processed_samples = 0
+    optimization_steps = 0
+    skipped_all_invalid_batches = 0
+    gradient_norm_sum = 0.0
+    maximum_gradient_norm = 0.0
 
     train_bar = tqdm(dataloader, total=len(dataloader),
                      desc=f"Training Epoch {epoch}/{max_epochs}")
@@ -719,16 +775,42 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
         # 1. 准备数据
         data_batch = batch['data'].to(device)
         labels_batch = batch['labels'].to(device)
+        _assert_finite_tensor(
+            data_batch,
+            tensor_name="training input",
+            epoch=epoch,
+            batch_index=i,
+        )
+        _assert_finite_tensor(
+            labels_batch,
+            tensor_name="training target",
+            epoch=epoch,
+            batch_index=i,
+        )
 
         optimizer.zero_grad()
 
         with autocast():
             # 前向传播
             outputs = model(data_batch)
+            primary_logits = _primary_logits(outputs)
+            _assert_finite_tensor(
+                primary_logits,
+                tensor_name="training logits",
+                epoch=epoch,
+                batch_index=i,
+            )
+            _assert_output_target_alignment(
+                primary_logits,
+                labels_batch,
+                epoch=epoch,
+                batch_index=i,
+            )
             loss, loss_dict = criterion(outputs, labels_batch)
             if not torch.isfinite(loss):
-                print(f"  [WARN] Non-finite training loss at epoch {epoch}, batch {i}; skipping batch.")
-                continue
+                raise FloatingPointError(
+                    f"Non-finite training loss at epoch {epoch}, batch {i}."
+                )
             if float(loss.detach()) < -1e-7:
                 raise FloatingPointError(
                     f"Negative training loss {float(loss.detach()):.8f} "
@@ -740,12 +822,30 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
                 if torch.is_tensor(loss_dict[k]):
                     loss_dict[k] = loss_dict[k].item()
 
+        if float(loss_dict.get("valid_pixels", 1.0)) <= 0.0:
+            skipped_all_invalid_batches += 1
+            print(
+                f"  [WARN] All targets are ignored at epoch {epoch}, batch {i}; "
+                "the batch is excluded from optimization and loss averages."
+            )
+            continue
+
         # 3. 反向传播
         scaler.scale(loss).backward()
 
         # 4. 梯度裁剪
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=grad_clip_max_norm,
+            error_if_nonfinite=True,
+        )
+        gradient_norm_value = float(gradient_norm.detach().cpu())
+        if gradient_norm_value <= 0.0 and float(loss.detach()) > 0.0:
+            raise FloatingPointError(
+                f"Zero total gradient norm for positive loss at epoch {epoch}, "
+                f"batch {i}; refusing a no-op optimizer step."
+            )
 
         # 5. 优化器步进
         scaler.step(optimizer)
@@ -757,6 +857,10 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
 
         # 7. 累加指标
         batch_size = data_batch.size(0)
+        processed_samples += batch_size
+        optimization_steps += 1
+        gradient_norm_sum += gradient_norm_value
+        maximum_gradient_norm = max(maximum_gradient_norm, gradient_norm_value)
         total_loss += loss.item() * batch_size
 
         for k in loss_components:
@@ -777,11 +881,20 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
         })
 
     # 9. 计算平均值
-    num_samples = len(dataloader.dataset)
-    total_loss /= num_samples
+    if optimization_steps == 0 or processed_samples == 0:
+        raise RuntimeError(
+            "Training epoch completed without any optimizer step. "
+            "Check ignored targets and the preceding numerical diagnostics."
+        )
+    total_loss /= processed_samples
 
     for k in loss_components:
-        loss_components[k] /= num_samples
+        loss_components[k] /= processed_samples
+    loss_components["mean_gradient_norm"] = gradient_norm_sum / optimization_steps
+    loss_components["maximum_gradient_norm"] = maximum_gradient_norm
+    loss_components["optimization_steps"] = optimization_steps
+    loss_components["processed_samples"] = processed_samples
+    loss_components["skipped_all_invalid_batches"] = skipped_all_invalid_batches
 
     return total_loss, loss_components
 
@@ -815,15 +928,38 @@ def validate(
         for i, batch in enumerate(val_bar):
             data_batch = batch['data'].to(device)
             labels_batch = batch['labels'].to(device)
+            _assert_finite_tensor(
+                data_batch,
+                tensor_name="validation input",
+                epoch=epoch,
+                batch_index=i,
+            )
+            _assert_finite_tensor(
+                labels_batch,
+                tensor_name="validation target",
+                epoch=epoch,
+                batch_index=i,
+            )
 
             with autocast():
                 outputs = model(data_batch)
+                val_outputs = _primary_logits(outputs)
+                _assert_finite_tensor(
+                    val_outputs,
+                    tensor_name="validation logits",
+                    epoch=epoch,
+                    batch_index=i,
+                )
+                _assert_output_target_alignment(
+                    val_outputs,
+                    labels_batch,
+                    epoch=epoch,
+                    batch_index=i,
+                )
                 
                 if isinstance(outputs, (list, tuple)):
-                    val_outputs = outputs[0]
                     loss, loss_dict = criterion(outputs, labels_batch)
                 else:
-                    val_outputs = outputs
                     loss, loss_dict = criterion(outputs, labels_batch)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(
@@ -841,6 +977,12 @@ def validate(
                     loss_components[key] += loss_dict[key] * data_batch.size(0)
 
             probs = torch.softmax(val_outputs, dim=1)[:, 1, ...]
+            _assert_finite_tensor(
+                probs,
+                tensor_name="validation fire probabilities",
+                epoch=epoch,
+                batch_index=i,
+            )
             preds = (probs >= 0.5).long()
             
             if labels_batch.shape[1] == 1:
@@ -936,6 +1078,19 @@ if invalid_label_splits:
         'Invalid label values detected before training in: '
         + ', '.join(invalid_label_splits)
     )
+for split_name, diagnostics in label_diagnostics.items():
+    if diagnostics['valid_pixels'] <= 0:
+        raise ValueError(f'{split_name} labels contain no valid pixels.')
+    if diagnostics['fire_pixels'] <= 0:
+        raise ValueError(
+            f'{split_name} labels contain no fire pixels; F1/IoU would be '
+            'scientifically meaningless and may remain constant.'
+        )
+    if diagnostics['background_pixels'] <= 0:
+        raise ValueError(
+            f'{split_name} labels contain no background pixels; precision and '
+            'specificity cannot be validated.'
+        )
 print(
     "Label contract verified: -1=ignored, 0=background, >0=fire. "
     f"Train non-unit positives={label_diagnostics['train']['nonunit_positive_pixels']}, "
@@ -1051,6 +1206,11 @@ print(f"   Strategy: {initialization_strategy}")
 print(
     "   Affine normalization scales checked: "
     f"{initialization_audit['affine_normalization_scales_checked']}"
+)
+print(
+    "   Floating-point buffers checked: "
+    f"{initialization_audit['floating_buffer_tensors_checked']} tensors / "
+    f"{initialization_audit['floating_buffer_values_checked']} values"
 )
 head_audit = initialization_audit["segmentation_head"]
 if head_audit["checked"]:
@@ -1269,6 +1429,11 @@ for epoch in range(MAX_EPOCHS):
     print(f"  - Tversky: {train_loss_components['tversky_loss']:.4f}")
     print(f"  - Focal: {train_loss_components['focal_loss']:.4f}")
     print(f"  - CE: {train_loss_components['ce_loss']:.4f}")
+    print(
+        "  - Gradient norm (mean/max before clipping): "
+        f"{train_loss_components['mean_gradient_norm']:.6f}/"
+        f"{train_loss_components['maximum_gradient_norm']:.6f}"
+    )
     
     # 验证
     val_loss, val_loss_components, mean_iou_val, mean_dice_val, custom_metrics = validate(
@@ -1352,6 +1517,11 @@ for epoch in range(MAX_EPOCHS):
         'train_tversky_loss': train_loss_components['tversky_loss'],
         'train_focal_loss': train_loss_components['focal_loss'],
         'train_ce_loss': train_loss_components['ce_loss'],
+        'training/mean_gradient_norm_before_clipping': train_loss_components['mean_gradient_norm'],
+        'training/maximum_gradient_norm_before_clipping': train_loss_components['maximum_gradient_norm'],
+        'training/optimization_steps': train_loss_components['optimization_steps'],
+        'training/processed_samples': train_loss_components['processed_samples'],
+        'training/skipped_all_invalid_batches': train_loss_components['skipped_all_invalid_batches'],
         'val_loss': val_loss,
         'val_tversky_loss': val_loss_components['tversky_loss'],
         'val_focal_loss': val_loss_components['focal_loss'],

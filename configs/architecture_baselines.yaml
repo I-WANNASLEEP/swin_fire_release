@@ -1,11 +1,16 @@
 experiment:
-  name: architecture_baselines_corrected_protocol
+  name: architecture_baselines_numerical_fix_v2
   seeds: [41, 42, 43, 44, 45]
-  output_root: results/training_runs/architecture_baselines_corrected_protocol
+  output_root: results/training_runs/architecture_baselines_numerical_fix_v2
 models:
   - swin_convlstm
   - swinunetr3d
   - unet3d
+model_settings:
+  swinunetr3d:
+    internal_attention: v2
+  unet3d:
+    internal_attention: none
 fairness_requirements:
   - Record pretraining status separately for each architecture.
   - Hold dataset partition, image size, sequence length, optimizer budget, and evaluation protocol fixed.

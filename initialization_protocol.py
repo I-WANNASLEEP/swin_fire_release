@@ -178,6 +178,22 @@ def audit_model_initialization(
             + ", ".join(nonfinite_parameters[:10])
         )
 
+    floating_buffer_tensors = 0
+    floating_buffer_values = 0
+    nonfinite_buffers: list[str] = []
+    for name, buffer in model.named_buffers():
+        if not (buffer.is_floating_point() or buffer.is_complex()):
+            continue
+        floating_buffer_tensors += 1
+        floating_buffer_values += buffer.numel()
+        if not bool(torch.isfinite(buffer.detach()).all()):
+            nonfinite_buffers.append(name)
+    if nonfinite_buffers:
+        raise RuntimeError(
+            "Non-finite floating-point buffers detected before training: "
+            + ", ".join(nonfinite_buffers[:10])
+        )
+
     normalization_modules = 0
     affine_normalization_scales = 0
     zero_normalization_scales: list[str] = []
@@ -205,6 +221,8 @@ def audit_model_initialization(
         "blanket_parameter_override": False,
         "parameter_tensors_checked": parameter_tensors,
         "parameter_values_checked": parameter_values,
+        "floating_buffer_tensors_checked": floating_buffer_tensors,
+        "floating_buffer_values_checked": floating_buffer_values,
         "normalization_modules_checked": normalization_modules,
         "affine_normalization_scales_checked": affine_normalization_scales,
         "segmentation_head": head_audit,
