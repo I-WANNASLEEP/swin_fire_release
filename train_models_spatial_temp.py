@@ -727,9 +727,8 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
             outputs = model(data_batch)
             loss, loss_dict = criterion(outputs, labels_batch)
             if not torch.isfinite(loss):
-                raise FloatingPointError(
-                    f"Non-finite training loss at epoch {epoch}, batch {i}."
-                )
+                print(f"  [WARN] Non-finite training loss at epoch {epoch}, batch {i}; skipping batch.")
+                continue
             if float(loss.detach()) < -1e-7:
                 raise FloatingPointError(
                     f"Negative training loss {float(loss.detach()):.8f} "

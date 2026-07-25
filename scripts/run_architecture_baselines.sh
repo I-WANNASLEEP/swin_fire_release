@@ -30,7 +30,7 @@ for model_name in swinunetr3d unet3d; do
         echo ""
         echo "=== Model: $model_name | Seed: $seed (run $run_index) ==="
         "$PYTHON" train_models_spatial_temp.py \
-            -m "$model_name" -mode af -b 4 \
+            -m "$model_name" -mode af -b 1 \
             -r "$run_index" -lr 0.0001 -av none \
             -nh 4 -ed 96 -nc 8 -ts 10 -it 3 \
             --max-epochs 100 -patience 15 -grad_clip 1.0 \
