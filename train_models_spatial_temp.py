@@ -1144,8 +1144,8 @@ if args.loss_type == 'masked_hybrid':
 else:
     criterion = MaskedCrossEntropyLoss()
 
-# Epoch-0 validation audit (random init only, terminal output, no W&B upload)
-if not pretrained_path:
+# Epoch-0 validation audit (random init swin_convlstm only, terminal output, no W&B upload)
+if not pretrained_path and model_name == 'swin_convlstm':
     print("\n" + "=" * 50)
     print("Epoch 0 Validation Audit (before any training)")
     print("=" * 50)
