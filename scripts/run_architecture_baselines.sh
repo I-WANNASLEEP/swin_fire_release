@@ -36,7 +36,7 @@ for model_name in swinunetr3d unet3d; do
             --max-epochs 100 -patience 15 -grad_clip 1.0 \
             -scheduler cosine_restart_decay \
             --data-root "$TS_SATFIRE_DATA_ROOT" \
-            --pretrained-path "" --allow-random-init --allow-random-init \
+            --allow-random-init \
             --output-dir "$run_dir" \
             --loss-type masked_hybrid \
             --wandb-mode online \

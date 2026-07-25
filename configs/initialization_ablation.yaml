@@ -3,8 +3,8 @@ experiment:
   seeds: [41, 42, 43]
   output_root: results/training_runs/initialization_ablation_corrected_loss
 variants:
-  - {initialization: cross_modal_rgb_mean_extension}
-  - {initialization: random}
+  - {initialization: cross_modal_rgb_mean_extension, strategy: module_native_defaults_then_smart_checkpoint_load, blanket_parameter_override: false}
+  - {initialization: random, strategy: module_native_defaults, blanket_parameter_override: false}
 controlled_parameters:
   attention: dcbam
   loss_config: configs/full_model.yaml#loss

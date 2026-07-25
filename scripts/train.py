@@ -168,6 +168,14 @@ def validate_runtime_inputs(config: dict) -> dict[str, object]:
             "path": None if pretrained is None else str(pretrained),
             "sha256": pretrained_sha256,
         },
+        "initialization": {
+            "strategy": (
+                "module_native_defaults"
+                if random_initialization
+                else "module_native_defaults_then_smart_checkpoint_load"
+            ),
+            "blanket_parameter_override": False,
+        },
     }
 
 
@@ -284,6 +292,7 @@ def main() -> None:
         "data_root": str(data_root),
         "dataset_files": runtime_inputs["dataset_files"],
         "pretrained": pretrained_record,
+        "initialization": runtime_inputs["initialization"],
         "training_protocol": protocol,
         "wandb": {
             "mode": wandb_mode,

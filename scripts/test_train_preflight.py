@@ -47,6 +47,13 @@ class TrainPreflightTest(unittest.TestCase):
 
         self.assertEqual(result["pretrained"]["mode"], "checkpoint")
         self.assertEqual(
+            result["initialization"]["strategy"],
+            "module_native_defaults_then_smart_checkpoint_load",
+        )
+        self.assertFalse(
+            result["initialization"]["blanket_parameter_override"]
+        )
+        self.assertEqual(
             result["pretrained"]["sha256"],
             hashlib.sha256(b"verified checkpoint fixture").hexdigest(),
         )
@@ -69,6 +76,33 @@ class TrainPreflightTest(unittest.TestCase):
                     )
             with self.assertRaises(FileNotFoundError):
                 validate_runtime_inputs(_config(root, str(root / "missing.pth")))
+
+    def test_random_initialization_uses_module_native_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dataset_train").mkdir()
+            (root / "dataset_val").mkdir()
+            for split, prefix in (
+                ("dataset_train", "train"),
+                ("dataset_val", "val"),
+            ):
+                for kind in ("img", "label"):
+                    (
+                        root
+                        / split
+                        / f"af_{prefix}_{kind}_seqtoseq_alll_10i_3.npy"
+                    ).write_bytes(b"fixture")
+
+            result = validate_runtime_inputs(_config(root, None))
+
+        self.assertEqual(result["pretrained"]["mode"], "random")
+        self.assertEqual(
+            result["initialization"],
+            {
+                "strategy": "module_native_defaults",
+                "blanket_parameter_override": False,
+            },
+        )
 
 
 if __name__ == "__main__":

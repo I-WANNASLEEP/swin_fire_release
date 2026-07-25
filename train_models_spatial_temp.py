@@ -84,6 +84,7 @@ from spatial_models.unetr.unetr import UNETR
 from spatial_models.swin_convlstm import SwinConvLSTM, ConvLSTMCell
 from satimg_dataset_processor.data_generator_torch import Normalize, FireDataset
 from datasets.label_diagnostics import summarize_label_file
+from initialization_protocol import audit_model_initialization
 from losses.masked_hybrid_loss import MaskedCrossEntropyLoss, MaskedHybridLoss
 from training_protocol import (
     VALIDATION_THRESHOLDS,
@@ -449,6 +450,7 @@ def wandb_config(
         "threshold_comparator": "probability >= threshold",
         "training_protocol": selection_protocol,
         "pretrained": startup_provenance["pretrained"],
+        "initialization": startup_provenance["initialization"],
         "label_diagnostics": startup_provenance["label_diagnostics"],
     }
     if args.run_manifest:
@@ -479,6 +481,7 @@ def wandb_config(
             "startup_provenance_path": str(startup_provenance_path),
             "training_protocol": selection_protocol,
             "pretrained": startup_provenance["pretrained"],
+            "initialization": startup_provenance["initialization"],
         }
         wandb_run_record_path.write_text(
             json.dumps(run_record, indent=2, sort_keys=True) + '\n', encoding='utf-8'
@@ -495,6 +498,26 @@ def wandb_config(
         "provenance/pretrained_loaded": int(startup_provenance["pretrained"]["loaded"]),
         "provenance/pretrained_loaded_layers": startup_provenance["pretrained"]["loaded_layers"],
         "provenance/pretrained_skipped_layers": startup_provenance["pretrained"]["skipped_layers"],
+        "provenance/initialization_strategy": startup_provenance["initialization"]["strategy"],
+        "provenance/blanket_parameter_override": int(
+            startup_provenance["initialization"]["blanket_parameter_override"]
+        ),
+        "provenance/initialization_audit_passed": int(
+            startup_provenance["initialization"]["audit"]["passed"]
+        ),
+        "provenance/normalization_scales_checked": startup_provenance[
+            "initialization"
+        ]["audit"]["affine_normalization_scales_checked"],
+        "provenance/segmentation_head_gradient_checked": int(
+            startup_provenance["initialization"]["audit"]["segmentation_head"][
+                "checked"
+            ]
+        ),
+        "provenance/segmentation_head_min_gradient_norm": startup_provenance[
+            "initialization"
+        ]["audit"]["segmentation_head"].get(
+            "minimum_critical_gradient_norm", 0.0
+        ),
         "protocol/checkpoint_after_epoch": checkpoint_after_epoch,
         "protocol/early_stopping_after_epoch": early_stopping_after_epoch,
     }
@@ -1005,16 +1028,37 @@ if pretrained_path:
     pretrained_loaded = True
     print(f"- Successfully loaded pretrained weights for {model_name}")
 else:
-    print("- Random initialization explicitly enabled for this controlled ablation.")
-    print("- Breaking all default (kaiming/xavier) initialization — re-randomizing every parameter.")
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if param.ndim >= 2:
-                param.normal_(mean=0.0, std=0.02)
-            elif param.ndim == 1:
-                param.zero_()
-            else:
-                param.uniform_(-0.02, 0.02)
+    print(
+        "- Random initialization explicitly enabled: preserving each "
+        "PyTorch/MONAI module's constructor-provided defaults."
+    )
+
+initialization_strategy = (
+    "module_native_defaults_then_smart_checkpoint_load"
+    if pretrained_path
+    else "module_native_defaults"
+)
+initialization_audit = audit_model_initialization(
+    model,
+    strategy=initialization_strategy,
+)
+initialization_record = {
+    "strategy": initialization_strategy,
+    "blanket_parameter_override": False,
+    "audit": initialization_audit,
+}
+print("- Initialization audit passed:")
+print(f"   Strategy: {initialization_strategy}")
+print(
+    "   Affine normalization scales checked: "
+    f"{initialization_audit['affine_normalization_scales_checked']}"
+)
+head_audit = initialization_audit["segmentation_head"]
+if head_audit["checked"]:
+    print(
+        "   Segmentation-head minimum critical gradient norm: "
+        f"{head_audit['minimum_critical_gradient_norm']:.6e}"
+    )
 
 pretrained_record = {
     'mode': 'checkpoint' if pretrained_path else 'random',
@@ -1044,6 +1088,16 @@ if args.run_manifest:
         raise RuntimeError(
             'Runtime pretrained provenance does not match the launcher manifest.'
         )
+    expected_initialization = launcher_manifest.get('initialization')
+    if expected_initialization and (
+        expected_initialization.get('strategy')
+        != initialization_record['strategy']
+        or bool(expected_initialization.get('blanket_parameter_override'))
+        != initialization_record['blanket_parameter_override']
+    ):
+        raise RuntimeError(
+            'Runtime initialization policy does not match the launcher manifest.'
+        )
 
 startup_provenance = {
     'positive_label_rule': 'target > 0',
@@ -1051,6 +1105,7 @@ startup_provenance = {
     'ignore_index': -1,
     'training_protocol': selection_protocol,
     'pretrained': pretrained_record,
+    'initialization': initialization_record,
     'label_diagnostics': label_diagnostics,
 }
 startup_provenance_path.write_text(

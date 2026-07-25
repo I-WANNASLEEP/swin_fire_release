@@ -40,7 +40,7 @@ for seed in "${SEEDS[@]}"; do
         --config configs/full_model.yaml \
         --seed "$seed" \
         --override-batch-size 4 --override-output-root "${BASE_OUTPUT}/random_init" \
-        --override-pretrained "" --allow-random-init \
+        --override-pretrained "" \
         --execute
 done
 

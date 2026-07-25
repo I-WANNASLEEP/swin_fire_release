@@ -6,6 +6,8 @@ SwinConvLSTM: 2D SwinUNETR + ConvLSTM 时序火灾检测模型 (Pro版)
 3. 集成 CBAM 注意力增强空间特征
 """
 
+import inspect
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -291,8 +293,7 @@ class SwinConvLSTM(nn.Module):
         print(f" [Model Init] SwinConvLSTM (Input: {in_channels}ch)")
         # 1. 编码器：使用 MONAI SwinUNETR 提取空间特征
         # 注意：这里我们只用它做特征提取，所以 out_channels 设置为 feature_size
-        self.swin_encoder = MonaiSwinUNETR(
-            img_size=image_size,
+        swin_kwargs = dict(
             in_channels=in_channels,
             out_channels=feature_size,
             depths=depths,
@@ -304,6 +305,12 @@ class SwinConvLSTM(nn.Module):
             spatial_dims=2,
             use_checkpoint=True,
         )
+        # MONAI releases before the dynamic-input API require ``img_size``;
+        # newer releases removed that keyword.  Select only the supported
+        # constructor surface without touching either version's initialization.
+        if "img_size" in inspect.signature(MonaiSwinUNETR.__init__).parameters:
+            swin_kwargs["img_size"] = image_size
+        self.swin_encoder = MonaiSwinUNETR(**swin_kwargs)
         # 2. 注意力增强 (在进入 LSTM 前净化特征)
         self.attention = get_attention_module(attn_version, feature_size, reduction=8)
         # 3. 时序聚合
