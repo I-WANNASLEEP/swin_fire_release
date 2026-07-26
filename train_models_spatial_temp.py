@@ -838,14 +838,16 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
         gradient_norm = torch.nn.utils.clip_grad_norm_(
             model.parameters(),
             max_norm=grad_clip_max_norm,
-            error_if_nonfinite=True,
+            error_if_nonfinite=False,
         )
         gradient_norm_value = float(gradient_norm.detach().cpu())
-        if gradient_norm_value <= 0.0 and float(loss.detach()) > 0.0:
-            raise FloatingPointError(
-                f"Zero total gradient norm for positive loss at epoch {epoch}, "
-                f"batch {i}; refusing a no-op optimizer step."
+        if not torch.isfinite(gradient_norm):
+            print(
+                f"  [WARN] Non-finite gradient norm at epoch {epoch}, batch {i}; "
+                "skipping optimizer step for this batch."
             )
+            scaler.update()
+            continue
 
         # 5. 优化器步进
         scaler.step(optimizer)

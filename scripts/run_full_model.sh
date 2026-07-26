@@ -31,7 +31,7 @@ for seed in 41 42 43 44 45; do
     "$PYTHON" scripts/train.py \
         --config configs/full_model.yaml \
         --seed "$seed" \
-        --override-max-epochs 30 \
+        --override-max-epochs 50 \
         --execute
     echo "--- Seed $seed completed ---"
 done

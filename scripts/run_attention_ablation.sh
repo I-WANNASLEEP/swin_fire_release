@@ -34,7 +34,7 @@ for attn in "${ATTENTIONS[@]}"; do
             --seed "$seed" \
             --override-attention "$attn" \
             --override-output-root "results/training_runs/attention_ablation_corrected_loss" \
-            --override-max-epochs 30 \
+            --override-max-epochs 50 \
             --execute
         echo "=== Done: $attn / seed $seed ==="
     done

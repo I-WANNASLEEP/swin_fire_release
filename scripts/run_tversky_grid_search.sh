@@ -56,7 +56,7 @@ for candidate in "${CANDIDATES[@]}"; do
             --seed "$seed" \
             --override-tversky-alpha "$alpha" \
             --override-tversky-beta "$beta" \
-            --override-max-epochs 30 \
+            --override-max-epochs 50 \
             --override-output-root "${BASE_OUTPUT}/${variant_name}" \
             --execute
         echo "  Done seed $seed"
