@@ -21,6 +21,7 @@ from _visualization_common import (
     PROJECT_ROOT,
     assert_locked_test_event,
     build_model,
+    center_crop_for_visualization,
     display_gray,
     load_test_window,
     normalized_tensor,
@@ -80,7 +81,14 @@ def capture_attention(model, image, device):
     return spatial_pre_sigmoid, spatial, channel, probabilities
 
 
-def render(image, spatial, channel_index, output_dir):
+def render(
+    image,
+    spatial,
+    channel_index,
+    output_dir,
+    *,
+    write_gif: bool = True,
+):
     relative_attention, attention_alpha, relative_metadata = (
         relative_attention_display(spatial)
     )
@@ -143,13 +151,14 @@ def render(image, spatial, channel_index, output_dir):
     )
     figure.savefig(output_dir / "attention_heatmap.png", dpi=180)
     plt.close(figure)
-    gif_frames[0].save(
-        output_dir / "attention_heatmap.gif",
-        save_all=True,
-        append_images=gif_frames[1:],
-        duration=700,
-        loop=0,
-    )
+    if write_gif:
+        gif_frames[0].save(
+            output_dir / "attention_heatmap.gif",
+            save_all=True,
+            append_images=gif_frames[1:],
+            duration=700,
+            loop=0,
+        )
     return {
         "absolute_min": float(spatial.min()),
         "absolute_max": float(spatial.max()),
@@ -201,6 +210,8 @@ def main() -> None:
     spatial_pre_sigmoid, spatial, channel, probabilities = capture_attention(
         model, image, device
     )
+    display_image = center_crop_for_visualization(image)
+    display_spatial = center_crop_for_visualization(spatial)
 
     output_dir = (
         args.output_dir.expanduser().resolve()
@@ -212,8 +223,8 @@ def main() -> None:
     )
     output_dir.mkdir(parents=True, exist_ok=False)
     display_metadata = render(
-        image,
-        spatial,
+        display_image,
+        display_spatial,
         AF_CHANNELS.index(args.display_channel),
         output_dir,
     )
@@ -246,6 +257,12 @@ def main() -> None:
                 "gate for each of 10 frames"
             ),
             "normalization": "same fixed active-fire means/std as training",
+            "visualization_crop": {
+                "model_input": "256x256",
+                "display_output": "224x224",
+                "source_slice": "[...,16:240,16:240]",
+                "scope": "visualization only; saved raw tensors remain 256x256",
+            },
             "attention_statistics": display_metadata,
             "pre_sigmoid_statistics": {
                 "min": float(spatial_pre_sigmoid.min()),

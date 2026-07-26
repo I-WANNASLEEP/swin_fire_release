@@ -19,6 +19,7 @@ from _visualization_common import (
     PROJECT_ROOT,
     assert_locked_test_event,
     build_model,
+    center_crop_for_visualization,
     confusion_overlay,
     display_gray,
     frame_confusion,
@@ -39,6 +40,8 @@ def render(
     output_dir: Path,
     records: list[dict],
     fn_color: str,
+    *,
+    write_gif: bool = True,
 ) -> None:
     figure, axes = plt.subplots(2, 5, figsize=(20, 8), constrained_layout=True)
     gif_frames = []
@@ -101,13 +104,14 @@ def render(
     )
     figure.savefig(output_dir / "sequence_tp_fp_fn.png", dpi=180)
     plt.close(figure)
-    gif_frames[0].save(
-        output_dir / "sequence_tp_fp_fn.gif",
-        save_all=True,
-        append_images=gif_frames[1:],
-        duration=700,
-        loop=0,
-    )
+    if write_gif:
+        gif_frames[0].save(
+            output_dir / "sequence_tp_fp_fn.gif",
+            save_all=True,
+            append_images=gif_frames[1:],
+            duration=700,
+            loop=0,
+        )
     render_reference_pages(
         image,
         raw_label,
@@ -251,6 +255,9 @@ def main() -> None:
     )
     threshold = frozen_threshold(checkpoint_payload, args.threshold)
     probabilities = infer_probabilities(model, image, device)
+    image = center_crop_for_visualization(image)
+    raw_label = center_crop_for_visualization(raw_label)
+    probabilities = center_crop_for_visualization(probabilities)
     records = frame_confusion(probabilities, raw_label, threshold)
 
     output_dir = (
@@ -280,6 +287,12 @@ def main() -> None:
             "data": data_metadata,
             "model": model_metadata,
             "threshold": threshold,
+            "visualization_crop": {
+                "model_input": "256x256",
+                "display_output": "224x224",
+                "source_slice": "[...,16:240,16:240]",
+                "scope": "visualization only",
+            },
             "threshold_source": (
                 "explicit_frozen_override"
                 if args.threshold is not None

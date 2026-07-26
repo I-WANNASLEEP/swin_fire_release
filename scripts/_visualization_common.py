@@ -27,6 +27,7 @@ AF_CHANNELS = (
     "I4_night",
     "I5_night",
 )
+VISUALIZATION_OUTPUT_SIZE = 224
 AF_MEAN = np.asarray(
     [
         18.76488,
@@ -330,6 +331,26 @@ def frame_confusion(
             }
         )
     return records
+
+
+def center_crop_for_visualization(
+    array: np.ndarray,
+    output_size: int = VISUALIZATION_OUTPUT_SIZE,
+) -> np.ndarray:
+    """Return an aligned center crop over the final two spatial dimensions."""
+    if array.ndim < 2:
+        raise ValueError("Visualization array must have two spatial dimensions.")
+    height, width = array.shape[-2:]
+    if output_size <= 0 or output_size > min(height, width):
+        raise ValueError(
+            f"Invalid visualization output_size={output_size} for "
+            f"spatial shape {(height, width)}."
+        )
+    top = (height - output_size) // 2
+    left = (width - output_size) // 2
+    return np.ascontiguousarray(
+        array[..., top : top + output_size, left : left + output_size]
+    )
 
 
 def display_gray(frame: np.ndarray) -> np.ndarray:

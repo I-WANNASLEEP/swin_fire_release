@@ -20,6 +20,7 @@ from _visualization_common import (
     PROJECT_ROOT,
     assert_locked_test_event,
     build_model,
+    center_crop_for_visualization,
     confusion_overlay,
     display_gray,
     frame_confusion,
@@ -170,9 +171,7 @@ def render_pages(
                 relative_attention[frame_index],
                 attention_alpha[frame_index],
             )
-            attention_mask = (
-                relative_attention[frame_index] >= 0.9
-            ) & valid
+            attention_mask = (attention_alpha[frame_index] > 0.0) & valid
             overlap_overlay, _overlap_masks = blend_overlap(
                 image[channel_index, frame_index],
                 target,
@@ -259,9 +258,7 @@ def render_gif(
     for frame_index in range(10):
         valid = raw_label[frame_index] != -1
         target = (raw_label[frame_index] > 0) & valid
-        attention_mask = (
-            relative_attention[frame_index] >= 0.9
-        ) & valid
+        attention_mask = (attention_alpha[frame_index] > 0.0) & valid
         fire_overlay, _ = confusion_overlay(
             image[channel_index, frame_index],
             probabilities[frame_index],
@@ -450,6 +447,11 @@ def main() -> None:
         channel_attention,
         probabilities,
     ) = capture_attention(model, image, device)
+    image = center_crop_for_visualization(image)
+    raw_label = center_crop_for_visualization(raw_label)
+    probabilities = center_crop_for_visualization(probabilities)
+    spatial_pre_sigmoid = center_crop_for_visualization(spatial_pre_sigmoid)
+    spatial_attention = center_crop_for_visualization(spatial_attention)
     relative_attention, attention_alpha, relative_metadata = (
         relative_attention_display(spatial_attention)
     )
@@ -459,7 +461,7 @@ def main() -> None:
     prediction = probabilities >= threshold
     valid = raw_label != -1
     target = (raw_label > 0) & valid
-    attention_mask = (relative_attention >= 0.9) & valid
+    attention_mask = (attention_alpha > 0.0) & valid
     overlap_records = [
         overlap_record(
             target[frame],
@@ -538,6 +540,12 @@ def main() -> None:
             "data": data_metadata,
             "model": model_metadata,
             "frozen_prediction_threshold": threshold,
+            "visualization_crop": {
+                "model_input": "256x256",
+                "display_output": "224x224",
+                "source_slice": "[...,16:240,16:240]",
+                "scope": "visualization and visualization-alignment metrics only",
+            },
             "attention_display": relative_metadata,
             "frame_detection_metrics": detection_records,
             "frame_overlap_metrics": overlap_records,

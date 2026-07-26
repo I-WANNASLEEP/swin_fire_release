@@ -280,9 +280,17 @@ probabilities, and 96 latent feature-channel weights.
 original grayscale input. Post-Sigmoid attention is normalized with the
 sequence-wide P2--P98 range. Relative values below `0.9` are fully transparent;
 values from `0.9` to `1.0` transition from yellow to red while opacity increases
-linearly from `0.3` to `1.0`. The NPZ preserves both pre- and post-Sigmoid
-absolute tensors, because transparent relative pixels can still have high
-absolute attention.
+linearly from `0.3` to `1.0`. For the DCBAM configuration
+(`kernel_size=7`, `dilation=2`, `padding=6`), every visualization uses the full
+`256×256` tensor for model inference and then synchronously crops the input
+base, label, probability, and attention tensors to
+`[..., 16:240, 16:240]`. Thus the displayed output is the center `224×224`
+region and the model-affected outer boundary cannot form a red frame. This is
+visualization-only: it does not alter inference, checkpoint weights, or the
+paper's evaluation metrics, and it does not suppress high responses on linear
+structures inside the retained center region. The NPZ
+preserves both pre- and post-Sigmoid absolute tensors, because transparent
+relative pixels can still have high absolute attention.
 
 The 96 channel weights are latent Swin feature channels, not the eight physical
 input bands. Attention intensity is a model-internal weight, not a causal
@@ -306,6 +314,30 @@ coverage measures the fraction of ground-truth fire inside the displayed
 relative-attention region; attention precision measures the fraction of that
 attention region that is actually fire. Neither is a segmentation accuracy or
 causal-explanation metric.
+
+To render all three products for every window in all 24 locked test events,
+load the checkpoint only once and use the resumable PNG-only batch exporter:
+
+```bash
+"$PYTHON" scripts/visualize_all_test_sequences.py \
+  --checkpoint /absolute/path/to/frozen_dcbam_checkpoint.pth \
+  --test-dir dataset_test \
+  --output-root results/all_test_visualizations
+```
+
+The current test folder contains 237 ten-frame windows, so a complete CPU run
+can take hours. The output root is one flat directory containing exactly seven
+PNG files per window (1,659 PNG files for all 237 windows): three fire-monitoring
+figures, one ten-frame attention figure, two aligned comparison figures, and one
+overlap-metric figure. It contains no subdirectories, GIF, NPZ, NPY, JSON, or
+CSV files. If interrupted, rerun the same command with `--resume`. For a
+one-window-per-event smoke test, add `--max-windows-per-event 1`. To regenerate
+only a specific window, add, for example:
+
+```bash
+  --event-id US_2021_ID4558511544420210705 \
+  --window-index 1
+```
 
 Historical checkpoints may be used to verify visualization compatibility and
 to produce clearly labeled qualitative examples. They must not be reported as
