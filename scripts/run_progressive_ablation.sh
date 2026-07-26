@@ -1,86 +1,94 @@
 #!/usr/bin/env bash
-# Progressive Ablation: Models A, B, C, D × 5 seeds each
+# Manuscript-matched progressive ablation: Models A-D, five independent seeds.
 #
-# Model A: Full model (DCBAM, copy-paste, cosine_restart_decay, masked_hybrid)
-# Model B: No copy-paste (DCBAM, cosine_restart_decay, masked_hybrid)
-# Model C: No copy-paste + step scheduler (DCBAM, step, masked_hybrid)
-# Model D: CE-only (DCBAM, step, masked_cross_entropy, no copy-paste)
+# A: pretraining + DCBAM + progressive Copy-Paste + cosine restarts + Hybrid Loss
+# B: A without Copy-Paste
+# C: B without learning-rate optimization (constant LR)
+# D: C with masked Cross-Entropy replacing corrected Masked Hybrid Loss
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
 
 PYTHON="${PYTHON:-python}"
+BASE_OUTPUT="${PROGRESSIVE_ABLATION_OUTPUT:-results/training_runs/progressive_ablation_corrected_protocol}"
+MAX_EPOCHS="${PAPER_MAX_EPOCHS:-100}"
+read -r -a SEEDS <<< "${ABLATION_SEEDS:-41 42 43 44 45}"
 
+require_path() {
+    local variable_name="$1"
+    local value="${!variable_name:-}"
+    if [[ -z "$value" || ! -e "$value" ]]; then
+        echo "ERROR: $variable_name must point to an existing path; received '${value:-unset}'." >&2
+        exit 2
+    fi
+}
 
+require_path TS_SATFIRE_DATA_ROOT
+require_path SWIN_PRETRAINED_PATH
+require_path SAMPLE_MANIFEST
+command -v "$PYTHON" >/dev/null
+"$PYTHON" scripts/materialize_splits.py --check
 
+if [[ "${ALLOW_DIRTY_TRACKED:-0}" != "1" ]] && ! git diff --quiet --exit-code -- .; then
+    echo "ERROR: tracked files are modified. Commit the approved protocol first, or use a clean worktree." >&2
+    exit 2
+fi
+if [[ -e "$BASE_OUTPUT" ]]; then
+    echo "ERROR: refusing to mix runs in existing output root: $BASE_OUTPUT" >&2
+    exit 2
+fi
 
-export TS_SATFIRE_DATA_ROOT="${TS_SATFIRE_DATA_ROOT:-}"
-export SWIN_PRETRAINED_PATH="${SWIN_PRETRAINED_PATH:-}"
-export SAMPLE_MANIFEST="${SAMPLE_MANIFEST:-}"
-
-SEEDS=(41 42 43 44 45)
-BASE_OUTPUT="results/training_runs/progressive_ablation_corrected_protocol"
-
-echo "Progressive Ablation (Models A-D)"
-
-# Model A: Full model
-echo ""
-echo ">>> Model A: Full (copy-paste, cosine_restart_decay, masked_hybrid)"
-for seed in "${SEEDS[@]}"; do
-    echo "  Seed $seed ..."
+run_variant() {
+    local phase="$1"
+    local variant="$2"
+    local seed="$3"
+    shift 3
+    local mode_flag="--$phase"
     "$PYTHON" scripts/train.py \
         --config configs/full_model.yaml \
         --seed "$seed" \
-        --override-output-root "${BASE_OUTPUT}/model_a_full" \
-        --override-max-epochs 50 \
-        --execute
-done
+        --override-output-root "${BASE_OUTPUT}/${variant}" \
+        --override-max-epochs "$MAX_EPOCHS" \
+        "$@" \
+        "$mode_flag"
+}
 
-# Model B: Without copy-paste
-echo ""
-echo ">>> Model B: No copy-paste (cosine_restart_decay, masked_hybrid)"
+echo "Progressive ablation protocol"
+echo "Seeds: ${SEEDS[*]}"
+echo "Epochs: $MAX_EPOCHS"
+echo "Base output: $BASE_OUTPUT"
+
+# Validate every realized run before the first output directory is created.
 for seed in "${SEEDS[@]}"; do
-    echo "  Seed $seed ..."
-    "$PYTHON" scripts/train.py \
-        --config configs/full_model.yaml \
-        --seed "$seed" \
-        --override-output-root "${BASE_OUTPUT}/model_b_no_copy_paste" \
-        --no-copy-paste \
-        --override-max-epochs 50 \
-        --execute
+    run_variant check model_a_full "$seed"
+    run_variant check model_b_without_copy_paste "$seed" --no-copy-paste
+    run_variant check model_c_without_lr_optimization "$seed" \
+        --no-copy-paste --override-scheduler constant
+    run_variant check model_d_ce_only "$seed" \
+        --no-copy-paste --override-scheduler constant \
+        --override-loss-type masked_cross_entropy
 done
 
-# Model C: No copy-paste + step scheduler
-echo ""
-echo ">>> Model C: No copy-paste + step scheduler (step LR)"
 for seed in "${SEEDS[@]}"; do
-    echo "  Seed $seed ..."
-    "$PYTHON" scripts/train.py \
-        --config configs/full_model.yaml \
-        --seed "$seed" \
-        --override-scheduler step \
-        --override-output-root "${BASE_OUTPUT}/model_c_step_scheduler" \
-        --no-copy-paste \
-        --override-max-epochs 50 \
-        --execute
+    echo "=== Model A / seed $seed ==="
+    run_variant execute model_a_full "$seed"
 done
-
-# Model D: CE-only (masked_cross_entropy, step scheduler, no copy-paste)
-echo ""
-echo ">>> Model D: CE-only (step LR, masked_cross_entropy)"
 for seed in "${SEEDS[@]}"; do
-    echo "  Seed $seed ..."
-    "$PYTHON" scripts/train.py \
-        --config configs/full_model.yaml \
-        --seed "$seed" \
-        --override-scheduler step \
-        --override-loss-type masked_cross_entropy \
-        --override-output-root "${BASE_OUTPUT}/model_d_ce_only" \
-        --no-copy-paste \
-        --override-max-epochs 50 \
-        --execute
+    echo "=== Model B / seed $seed ==="
+    run_variant execute model_b_without_copy_paste "$seed" --no-copy-paste
+done
+for seed in "${SEEDS[@]}"; do
+    echo "=== Model C / seed $seed ==="
+    run_variant execute model_c_without_lr_optimization "$seed" \
+        --no-copy-paste --override-scheduler constant
+done
+for seed in "${SEEDS[@]}"; do
+    echo "=== Model D / seed $seed ==="
+    run_variant execute model_d_ce_only "$seed" \
+        --no-copy-paste --override-scheduler constant \
+        --override-loss-type masked_cross_entropy
 done
 
-echo ""
-echo "Progressive ablation complete."
+echo "Progressive ablation complete: $BASE_OUTPUT"

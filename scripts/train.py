@@ -66,6 +66,54 @@ def load_config(path: Path) -> dict:
     return config
 
 
+def validate_scheduler_config(training: dict) -> dict[str, object]:
+    scheduler = training.get("scheduler")
+    supported = {
+        "cosine",
+        "cosine_restart_decay",
+        "plateau",
+        "step",
+        "constant",
+    }
+    if scheduler not in supported:
+        raise ValueError(
+            f"training.scheduler must be one of {sorted(supported)}; "
+            f"received {scheduler!r}."
+        )
+    protocol = {
+        "name": scheduler,
+        "step_unit": "none" if scheduler == "constant" else "epoch",
+    }
+    if scheduler in {"cosine", "cosine_restart_decay"}:
+        t0_epochs = int(training.get("scheduler_t0_epochs", 10))
+        t_mult = int(training.get("scheduler_t_mult", 1))
+        decay_factor = float(training.get("scheduler_decay_factor", 0.99))
+        eta_min = float(training.get("scheduler_eta_min", 1e-7))
+        if t0_epochs <= 0:
+            raise ValueError("training.scheduler_t0_epochs must be positive.")
+        if t_mult < 1:
+            raise ValueError("training.scheduler_t_mult must be at least 1.")
+        if not 0.0 < decay_factor <= 1.0:
+            raise ValueError(
+                "training.scheduler_decay_factor must be in (0, 1]."
+            )
+        if eta_min < 0.0:
+            raise ValueError("training.scheduler_eta_min must be non-negative.")
+        protocol.update(
+            {
+                "t0_epochs": t0_epochs,
+                "t_mult": t_mult,
+                "decay_factor": (
+                    decay_factor
+                    if scheduler == "cosine_restart_decay"
+                    else 1.0
+                ),
+                "eta_min": eta_min,
+            }
+        )
+    return protocol
+
+
 def validate(config: dict) -> dict[str, object]:
     data = config.get("data", {})
     splits = data.get("splits", {})
@@ -234,6 +282,7 @@ def main() -> None:
     if args.seed not in seeds:
         raise ValueError(f"Seed {args.seed} is not declared in {config_path}: {seeds}")
     training = config.get("training", {})
+    scheduler_protocol = validate_scheduler_config(training)
     protocol = validate_protocol(
         checkpoint_after_epoch=int(training.get("checkpoint_after_epoch", 50)),
         early_stopping_after_epoch=int(
@@ -255,6 +304,7 @@ def main() -> None:
                 "config": str(config_path),
                 "seed": args.seed,
                 "training_protocol": protocol,
+                "scheduler_protocol": scheduler_protocol,
                 **validation,
                 **runtime_inputs,
             },
@@ -269,6 +319,7 @@ def main() -> None:
     model = config["model"]
     loss = config["loss"]
     training = config["training"]
+    scheduler_protocol = validate_scheduler_config(training)
     wandb_settings = training.get("wandb", {})
     wandb_mode = wandb_settings.get("mode", training.get("wandb_mode", "disabled"))
     wandb_project = wandb_settings.get("project", "swinfire_jei_resubmission_v2")
@@ -289,14 +340,32 @@ def main() -> None:
         else Path(pretrained_record["path"])
     )
     run_dir = PROJECT_ROOT / experiment["output_root"] / f"seed_{args.seed}"
+    if run_dir.exists() and any(run_dir.iterdir()):
+        raise FileExistsError(
+            f"Refusing to append to non-empty run directory: {run_dir}"
+        )
     run_dir.mkdir(parents=True, exist_ok=True)
+    resolved_config_payload = json.dumps(
+        config, indent=2, sort_keys=True
+    ) + "\n"
+    resolved_config_path = run_dir / "resolved_config.json"
+    resolved_config_path.write_text(
+        resolved_config_payload, encoding="utf-8"
+    )
     manifest = {
-        "config": str(config_path), "config_sha256": sha256(config_path), "seed": args.seed,
+        "config": str(config_path),
+        "config_sha256": sha256(config_path),
+        "resolved_config": str(resolved_config_path),
+        "resolved_config_sha256": hashlib.sha256(
+            resolved_config_payload.encode("utf-8")
+        ).hexdigest(),
+        "seed": args.seed,
         "data_root": str(data_root),
         "dataset_files": runtime_inputs["dataset_files"],
         "pretrained": pretrained_record,
         "initialization": runtime_inputs["initialization"],
         "training_protocol": protocol,
+        "scheduler_protocol": scheduler_protocol,
         "wandb": {
             "mode": wandb_mode,
             "project": wandb_project,
@@ -325,6 +394,12 @@ def main() -> None:
             str(value) for value in protocol["validation_thresholds"]
         ],
         "-scheduler", training["scheduler"], "--data-root", str(data_root),
+        "--scheduler-t0-epochs", str(training.get("scheduler_t0_epochs", 10)),
+        "--scheduler-t-mult", str(training.get("scheduler_t_mult", 1)),
+        "--scheduler-decay-factor", str(
+            training.get("scheduler_decay_factor", 0.99)
+        ),
+        "--scheduler-eta-min", str(training.get("scheduler_eta_min", 1e-7)),
         "--output-dir", str(run_dir),
         "--wandb-mode", wandb_mode, "--wandb-project", str(wandb_project),
         "--run-manifest", str(run_manifest_path),

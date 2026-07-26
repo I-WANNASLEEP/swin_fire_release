@@ -50,31 +50,8 @@ except ModuleNotFoundError:
 
     wandb = _DisabledWandb()
 import pandas as pd
-from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau, CosineAnnealingLR
+from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
 import torch.nn.functional as F
-
-# ==================== 自定义调度器 ====================
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
-
-class CosineAnnealingWarmRestartsWithDecay(CosineAnnealingWarmRestarts):
-    """
-    在每一次 restart（余弦周期结束）时，把学习率的峰值乘以 decay_factor。
-    decay_factor < 1 时会使每轮的最高学习率逐渐下降（如 0.99）。
-    """
-    def __init__(self, optimizer, T_0, T_mult=1, decay_factor=0.99, eta_min=0, last_epoch=-1):
-        super().__init__(optimizer, T_0, T_mult, eta_min, last_epoch)
-        self.decay_factor = decay_factor
-        self._restart_cnt = 0
-
-    def _decay_base_lrs(self):
-        self._restart_cnt += 1
-        self.base_lrs = [lr * (self.decay_factor ** self._restart_cnt) for lr in self.base_lrs]
-
-    def step(self, epoch=None):
-        super().step(epoch)
-        # 当检测到一次完整的周期结束后（即 restart），_last_restart 为 True
-        if getattr(self, "_last_restart", False):
-            self._decay_base_lrs()
 
 # ------------------- 原始导入 -------------------
 from spatial_models.unet import UNet
@@ -86,6 +63,7 @@ from satimg_dataset_processor.data_generator_torch import Normalize, FireDataset
 from datasets.label_diagnostics import summarize_label_file
 from initialization_protocol import audit_model_initialization
 from losses.masked_hybrid_loss import MaskedCrossEntropyLoss, MaskedHybridLoss
+from scheduler_protocol import EpochCosineAnnealingWarmRestartsWithDecay
 from training_protocol import (
     VALIDATION_THRESHOLDS,
     EarlyStopping,
@@ -183,9 +161,40 @@ parser.add_argument('-it', type=int, help='interval')
 parser.add_argument('-epoch', '--max-epochs', dest='max_epochs', type=int, default=100, help='Maximum training epochs')
 parser.add_argument('-patience', type=int, default=15, help='Early stopping patience')
 parser.add_argument('-grad_clip', type=float, default=1.0, help='Gradient clipping max norm')
-parser.add_argument('-scheduler', type=str, default='cosine_restart_decay', choices=['cosine', 'cosine_restart_decay', 'plateau', 'step'], help='Learning-rate scheduler')
+parser.add_argument(
+    '-scheduler',
+    type=str,
+    default='cosine_restart_decay',
+    choices=['cosine', 'cosine_restart_decay', 'plateau', 'step', 'constant'],
+    help='Learning-rate scheduler; constant means no scheduler step.',
+)
 parser.add_argument('--warmup-epochs', type=int, default=0, help='Linear LR warmup epochs (0=disabled)')
-parser.add_argument('-decay_factor', type=float, default=0.99, help='Decay factor for LR peak after each restart (default 0.99)')
+parser.add_argument(
+    '--scheduler-t0-epochs',
+    type=int,
+    default=10,
+    help='First cosine-restart cycle length in epochs.',
+)
+parser.add_argument(
+    '--scheduler-t-mult',
+    type=int,
+    default=1,
+    help='Multiplicative growth of cosine-restart cycle length.',
+)
+parser.add_argument(
+    '--scheduler-decay-factor',
+    '-decay_factor',
+    dest='scheduler_decay_factor',
+    type=float,
+    default=0.99,
+    help='Peak-LR multiplier applied after each epoch-defined restart.',
+)
+parser.add_argument(
+    '--scheduler-eta-min',
+    type=float,
+    default=1e-7,
+    help='Minimum learning rate for the cosine schedule.',
+)
 parser.add_argument('-tversky_alpha', type=float, default=0.5, help='Tversky false-positive weight; select on validation only')
 parser.add_argument('-tversky_beta', type=float, default=0.5, help='Tversky false-negative weight; select on validation only')
 parser.add_argument('-focal_gamma', type=float, default=3.0, help='Masked focal-loss gamma')
@@ -243,6 +252,30 @@ mode = args.mode
 patience = args.patience
 grad_clip_max_norm = args.grad_clip
 scheduler_type = args.scheduler
+scheduler_protocol = {
+    'name': scheduler_type,
+    'step_unit': 'none' if scheduler_type == 'constant' else 'epoch',
+    't0_epochs': (
+        args.scheduler_t0_epochs
+        if scheduler_type in ('cosine', 'cosine_restart_decay')
+        else None
+    ),
+    't_mult': (
+        args.scheduler_t_mult
+        if scheduler_type in ('cosine', 'cosine_restart_decay')
+        else None
+    ),
+    'decay_factor': (
+        args.scheduler_decay_factor
+        if scheduler_type == 'cosine_restart_decay'
+        else (1.0 if scheduler_type == 'cosine' else None)
+    ),
+    'eta_min': (
+        args.scheduler_eta_min
+        if scheduler_type in ('cosine', 'cosine_restart_decay')
+        else None
+    ),
+}
 
 if model_name == 'swinunetr3d' and attn_version not in ('v1', 'v2', 'ar'):
     parser.error(
@@ -264,6 +297,14 @@ if MAX_EPOCHS <= checkpoint_after_epoch:
     parser.error(
         f'--max-epochs must exceed --checkpoint-after-epoch ({checkpoint_after_epoch}).'
     )
+if args.scheduler_t0_epochs <= 0:
+    parser.error('--scheduler-t0-epochs must be positive.')
+if args.scheduler_t_mult < 1:
+    parser.error('--scheduler-t-mult must be at least 1.')
+if not 0.0 < args.scheduler_decay_factor <= 1.0:
+    parser.error('--scheduler-decay-factor must be in (0, 1].')
+if args.scheduler_eta_min < 0.0:
+    parser.error('--scheduler-eta-min must be non-negative.')
 
 # ==================== 设置随机种子 ====================
 SEED = run + 41
@@ -443,6 +484,7 @@ def wandb_config(
         "patience": patience,
         "grad_clip": grad_clip_max_norm,
         "scheduler": scheduler_type,
+        "scheduler_protocol": scheduler_protocol,
         "attention_version": attn_version,
         "model": model_name,
         "input_channels": n_channel,
@@ -728,12 +770,12 @@ def _assert_output_target_alignment(logits, targets, *, epoch, batch_index):
 
 # ==================== 训练函数 ====================
 def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
-                    grad_clip_max_norm, epoch, max_epochs, scheduler=None):
+                    grad_clip_max_norm, epoch, max_epochs):
     """
     训练回合
     
     改进点:
-    - 支持按 batch step 更新的 scheduler (Cosine Annealing)
+    - Scheduler is deliberately excluded: every schedule steps once per epoch.
     - 使用 Copy-Paste 数据增强
     - 支持新的改进损失函数和Deep Supervision
 
@@ -747,8 +789,6 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
         grad_clip_max_norm: 梯度裁剪阈值
         epoch: 当前 epoch
         max_epochs: 总 epoch 数
-        scheduler: 学习率调度器（可选，按 batch step）
-
     Returns:
         total_loss: 平均总损失
         loss_components: 包含各损失组件的字典
@@ -838,26 +878,20 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
         gradient_norm = torch.nn.utils.clip_grad_norm_(
             model.parameters(),
             max_norm=grad_clip_max_norm,
-            error_if_nonfinite=False,
+            error_if_nonfinite=True,
         )
         gradient_norm_value = float(gradient_norm.detach().cpu())
-        if not torch.isfinite(gradient_norm):
-            print(
-                f"  [WARN] Non-finite gradient norm at epoch {epoch}, batch {i}; "
-                "skipping optimizer step for this batch."
+        if gradient_norm_value <= 0.0 and float(loss.detach()) > 0.0:
+            raise FloatingPointError(
+                f"Positive loss produced zero total gradient at epoch {epoch}, "
+                f"batch {i}; refusing the optimizer step."
             )
-            scaler.update()
-            continue
 
         # 5. 优化器步进
         scaler.step(optimizer)
         scaler.update()
-        
-        # 6. Step Scheduler (Per Batch) - 用于 Cosine Annealing
-        if scheduler is not None:
-            scheduler.step()
 
-        # 7. 累加指标
+        # 6. 累加指标
         batch_size = data_batch.size(0)
         processed_samples += batch_size
         optimization_steps += 1
@@ -869,7 +903,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
             if k in loss_dict:
                 loss_components[k] += loss_dict[k] * batch_size
 
-        # 8. 更新进度条
+        # 7. 更新进度条
         current_loss = loss.item()
         lr_current = optimizer.param_groups[0]["lr"]
         
@@ -882,7 +916,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device,
             'copy_paste': cp_prob_str
         })
 
-    # 9. 计算平均值
+    # 8. 计算平均值
     if optimization_steps == 0 or processed_samples == 0:
         raise RuntimeError(
             "Training epoch completed without any optimizer step. "
@@ -1265,6 +1299,7 @@ startup_provenance = {
     'threshold_comparator': 'probability >= threshold',
     'ignore_index': -1,
     'training_protocol': selection_protocol,
+    'scheduler_protocol': scheduler_protocol,
     'pretrained': pretrained_record,
     'initialization': initialization_record,
     'label_diagnostics': label_diagnostics,
@@ -1305,34 +1340,64 @@ if args.loss_type == 'masked_hybrid':
 else:
     criterion = MaskedCrossEntropyLoss()
 
-# Epoch-0 validation audit (random init swin_convlstm only, terminal output, no W&B upload)
-if not pretrained_path and model_name == 'swin_convlstm':
+# Epoch-0 validation audit for both initialization strategies.  Prefix every
+# W&B key with audit/epoch0 so this diagnostic can never become a checkpoint
+# or parameter-selection metric.
+if model_name == 'swin_convlstm':
     print("\n" + "=" * 50)
     print("Epoch 0 Validation Audit (before any training)")
     print("=" * 50)
-    try:
-        val0_loss, val0_components, val0_iou, val0_dice, val0_metrics = validate(
-            model, val_dataloader, criterion, device, 0, MAX_EPOCHS, validation_thresholds,
-        )
-        print(f"Validation Loss: {val0_loss:.4f}")
-        print(f"  - Tversky: {val0_components['tversky_loss']:.4f}")
-        print(f"  - Focal: {val0_components['focal_loss']:.4f}")
-        print(f"  - CE: {val0_components['ce_loss']:.4f}")
-        print(f"Mean IoU: {val0_iou:.4f}, Mean Dice: {val0_dice:.4f}")
-        print(f"\nValidation Metrics:")
-        print(f"  Precision: {val0_metrics['precision']:.4f}")
-        print(f"  Recall: {val0_metrics['recall']:.4f}")
-        print(f"  F1 Score: {val0_metrics['f1_score']:.4f}")
-        print(f"  IoU: {val0_metrics['iou']:.4f}")
-        print(f"  Specificity: {val0_metrics['specificity']:.4f}")
-        print(f"  TP: {val0_metrics['true_positive']}, TN: {val0_metrics['true_negative']}")
-        print(f"  FP: {val0_metrics['false_positive']}, FN: {val0_metrics['false_negative']}")
-        print(f"\nBest Threshold Results:")
-        print(f"  Best Threshold: {val0_metrics['best_threshold']:.2f}")
-        print(f"  Best F1 Score: {val0_metrics['best_f1']:.4f}")
-        print(f"  Best IoU: {val0_metrics['best_iou']:.4f}")
-    except Exception as exc:
-        print(f"Epoch 0 validation skipped (non-critical): {exc}")
+    val0_loss, val0_components, val0_iou, val0_dice, val0_metrics = validate(
+        model, val_dataloader, criterion, device, 0, MAX_EPOCHS, validation_thresholds,
+    )
+    print(f"Validation Loss: {val0_loss:.4f}")
+    print(f"  - Tversky: {val0_components['tversky_loss']:.4f}")
+    print(f"  - Focal: {val0_components['focal_loss']:.4f}")
+    print(f"  - CE: {val0_components['ce_loss']:.4f}")
+    print(f"Mean IoU: {val0_iou:.4f}, Mean Dice: {val0_dice:.4f}")
+    print(f"\nValidation Metrics:")
+    print(f"  Precision: {val0_metrics['precision']:.4f}")
+    print(f"  Recall: {val0_metrics['recall']:.4f}")
+    print(f"  F1 Score: {val0_metrics['f1_score']:.4f}")
+    print(f"  IoU: {val0_metrics['iou']:.4f}")
+    print(f"  Specificity: {val0_metrics['specificity']:.4f}")
+    print(f"  TP: {val0_metrics['true_positive']}, TN: {val0_metrics['true_negative']}")
+    print(f"  FP: {val0_metrics['false_positive']}, FN: {val0_metrics['false_negative']}")
+    print(f"\nBest Threshold Results:")
+    print(f"  Best Threshold: {val0_metrics['best_threshold']:.2f}")
+    print(f"  Best F1 Score: {val0_metrics['best_f1']:.4f}")
+    print(f"  Best IoU: {val0_metrics['best_iou']:.4f}")
+    epoch0_record = {
+        'initialization': pretrained_record['mode'],
+        'pretrained_sha256': pretrained_record['sha256'],
+        'loss': float(val0_loss),
+        'tversky_loss': float(val0_components['tversky_loss']),
+        'focal_loss': float(val0_components['focal_loss']),
+        'ce_loss': float(val0_components['ce_loss']),
+        'f1_at_fixed_0_5': float(val0_metrics['f1_score']),
+        'iou_at_fixed_0_5': float(val0_metrics['iou']),
+        'precision_at_fixed_0_5': float(val0_metrics['precision']),
+        'recall_at_fixed_0_5': float(val0_metrics['recall']),
+        'selected_threshold': float(val0_metrics['best_threshold']),
+        'f1_at_selected_threshold': float(val0_metrics['best_f1']),
+        'iou_at_selected_threshold': float(val0_metrics['best_iou']),
+        'tp_at_fixed_0_5': int(val0_metrics['true_positive']),
+        'tn_at_fixed_0_5': int(val0_metrics['true_negative']),
+        'fp_at_fixed_0_5': int(val0_metrics['false_positive']),
+        'fn_at_fixed_0_5': int(val0_metrics['false_negative']),
+    }
+    (output_dir / 'epoch0_validation_audit.json').write_text(
+        json.dumps(epoch0_record, indent=2, sort_keys=True) + '\n',
+        encoding='utf-8',
+    )
+    wandb_log_or_fail(
+        {
+            f'audit/epoch0/{key}': value
+            for key, value in epoch0_record.items()
+            if isinstance(value, (int, float))
+        },
+        'epoch-0 validation audit',
+    )
     print("=" * 50 + "\n")
 
 # Use unified learning rate parameter groups
@@ -1350,23 +1415,33 @@ print(f"   Unified LR: {lr:.2e}")
 # Restarted cosine is the corrected full-model default.  Step and plateau are
 # controlled alternatives for documented ablations only.
 if scheduler_type in ('cosine', 'cosine_restart_decay'):
-    scheduler = CosineAnnealingWarmRestartsWithDecay(
+    scheduler = EpochCosineAnnealingWarmRestartsWithDecay(
         optimizer,
-        T_0=MAX_EPOCHS,
-        T_mult=1,
-        decay_factor=args.decay_factor,
-        eta_min=1e-7,
+        t0_epochs=args.scheduler_t0_epochs,
+        t_mult=args.scheduler_t_mult,
+        decay_factor=(
+            args.scheduler_decay_factor
+            if scheduler_type == 'cosine_restart_decay'
+            else 1.0
+        ),
+        eta_min=args.scheduler_eta_min,
     )
-    scheduler_per_batch = True
-    print(f"Using CosineAnnealingWarmRestartsWithDecay with decay_factor={args.decay_factor} (no warmup).")
+    print(
+        "Using epoch-stepped cosine warm restarts: "
+        f"T_0={args.scheduler_t0_epochs} epochs, "
+        f"T_mult={args.scheduler_t_mult}, "
+        f"decay_factor={scheduler.decay_factor}, "
+        f"eta_min={args.scheduler_eta_min:.2e}."
+    )
 elif scheduler_type == 'step':
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=max(1, MAX_EPOCHS // 3), gamma=0.1)
-    scheduler_per_batch = False
     print(f"Using StepLR every {max(1, MAX_EPOCHS // 3)} epochs with gamma=0.1.")
-else:
+elif scheduler_type == 'plateau':
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=max(1, patience // 3))
-    scheduler_per_batch = False
     print(f"Using ReduceLROnPlateau with patience={max(1, patience // 3)}.")
+else:
+    scheduler = None
+    print("Using constant learning rate (no scheduler), as required by Model C/D.")
 
 scaler = GradScaler()
 
@@ -1423,8 +1498,7 @@ for epoch in range(MAX_EPOCHS):
     # 训练
     train_loss, train_loss_components = train_one_epoch(
         model, train_dataloader, criterion, optimizer, scaler, device,
-        grad_clip_max_norm, epoch + 1, MAX_EPOCHS, 
-        scheduler=scheduler if scheduler_per_batch else None
+        grad_clip_max_norm, epoch + 1, MAX_EPOCHS
     )
     
     print(f"Train Loss: {train_loss:.4f}")
@@ -1473,18 +1547,19 @@ for epoch in range(MAX_EPOCHS):
     print(f"  Best F1 Score: {custom_metrics['best_f1']:.4f}")
     print(f"  Best IoU: {custom_metrics['best_iou']:.4f}")
 
-    if not scheduler_per_batch:
-        if scheduler_type == 'plateau':
-            scheduler.step(val_loss)
+    epoch_number = epoch + 1
+    if scheduler_type == 'plateau':
+        scheduler.step(val_loss)
+    elif scheduler is not None:
+        if scheduler_type in ('cosine', 'cosine_restart_decay'):
+            scheduler.step(epoch_number)
         else:
             scheduler.step()
 
-    # The optimizer has one unified group.  Record both boundaries because the
-    # cosine scheduler steps inside the batch loop and other schedulers step
-    # after validation.
+    # Every non-constant scheduler steps once after validation.  Record both
+    # boundaries so the batch-size-invariant trajectory can be audited.
     unified_lr_end = optimizer.param_groups[0]["lr"]
     selected_f1 = custom_metrics['best_f1']
-    epoch_number = epoch + 1
     checkpoint_eligible = checkpoint_is_eligible(
         epoch_number, checkpoint_after_epoch
     )
@@ -1587,9 +1662,7 @@ for epoch in range(MAX_EPOCHS):
 
     wandb_log_or_fail(log_dict, f'training epoch {epoch + 1}')
     
-    # Cosine Scheduler 已在 train_one_epoch 中按 batch 更新
-    # 打印当前学习率
-    # 使用统一的学习率组，直接获取当前学习率
+    # The end-of-epoch value is the learning rate prepared for the next epoch.
     print(f"  - End of Epoch LR: {unified_lr_end:.2e}")
     
     # 保存混淆矩阵
@@ -1624,7 +1697,10 @@ for epoch in range(MAX_EPOCHS):
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
+            'scheduler_state_dict': (
+                scheduler.state_dict() if scheduler is not None else None
+            ),
+            'scheduler_protocol': scheduler_protocol,
             'train_loss': train_loss,
             'val_loss': val_loss,
             'val_metrics': custom_metrics,

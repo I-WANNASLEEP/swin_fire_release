@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Materialize the pinned official TS-SatFire active-fire event partition.
+"""Materialize this project's locked TS-SatFire active-fire partition.
 
-The official generator at the pinned upstream revision builds training events
-from the 2017–2020 ROI CSVs minus 13 validation IDs, and names 17 active-fire
-test events.  This script makes that implicit logic inspectable and versioned.
+Training and validation follow the pinned upstream ROI logic.  At the user's
+direction, the authoritative test cohort is the 24 ``US_2021_*`` units present
+in ``dataset_test`` rather than the upstream generator's 17 named-fire labels.
+This deliberate project-level choice is explicit and versioned here.
 """
 
 from __future__ import annotations
@@ -24,10 +25,30 @@ VALIDATION_IDS = (
     "22712904",
 )
 ACTIVE_FIRE_TEST_IDS = (
-    "elephant_hill_fire", "eagle_bluff_fire", "double_creek_fire", "sparks_lake_fire",
-    "lytton_fire", "chuckegg_creek_fire", "swedish_fire", "sydney_fire", "thomas_fire",
-    "tubbs_fire", "carr_fire", "camp_fire", "creek_fire", "blue_ridge_fire",
-    "dixie_fire", "mosquito_fire", "calfcanyon_fire",
+    "US_2021_MT4714310953420211004",
+    "US_2021_ID4558511544420210705",
+    "US_2021_ID4663811466720210707",
+    "US_2021_MT4568311385420210708",
+    "US_2021_ID4453211532920210810",
+    "US_2021_ID4762711608320210708",
+    "US_2021_WA4879111827120210805",
+    "US_2021_WA4828511853120210713",
+    "US_2021_WA4856812048820210708",
+    "US_2021_WA4877811903420210803",
+    "US_2021_MT4579011310120210708",
+    "US_2021_CA3568711855020210818",
+    "US_2021_CA3604711863120210910",
+    "US_2021_CA3627811855020210815",
+    "US_2021_CA3658211879520210912",
+    "US_2021_CA4086312235520210630",
+    "US_2021_NM3344410803520210514",
+    "US_2021_CA3451712013120211011",
+    "US_2021_AZ3368910927620210616",
+    "US_2021_AZ3345510938920210616",
+    "US_2021_NM3676810505920211120",
+    "US_2021_NM3323810847220210520",
+    "US_2021_NM3340210587120210426",
+    "US_2021_FL2521008104520210308",
 )
 
 
@@ -63,6 +84,37 @@ def write_manifest(path: Path, event_ids: tuple[str, ...] | list[str], purpose: 
     path.write_text("\n".join([*header, *event_ids, ""]), encoding="utf-8")
 
 
+def read_manifest(path: Path) -> list[str]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Expected split manifest is missing: {path}")
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+
+
+def assert_existing_manifests(expected: dict[str, list[str]]) -> None:
+    mismatches = []
+    for filename, expected_ids in expected.items():
+        path = SPLIT_DIR / filename
+        actual_ids = read_manifest(path)
+        if actual_ids != expected_ids:
+            unexpected = sorted(set(actual_ids) - set(expected_ids))
+            missing = sorted(set(expected_ids) - set(actual_ids))
+            mismatches.append(
+                f"{filename}: expected {len(expected_ids)}, found "
+                f"{len(actual_ids)}, unexpected={unexpected[:5]}, "
+                f"missing={missing[:5]}"
+            )
+    if mismatches:
+        raise ValueError(
+            "Checked-in split manifests do not match the pinned upstream "
+            "materializer. Resolve the event-to-scene mapping before training:\n"
+            + "\n".join(mismatches)
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Validate sources without writing manifests.")
@@ -71,16 +123,22 @@ def main() -> None:
     source_ids = load_train_source_ids()
     validation = sorted(VALIDATION_IDS, key=_id_sort_key)
     training = [event_id for event_id in source_ids if event_id not in set(validation)]
+    expected = {
+        "train_event_ids.txt": training,
+        "validation_event_ids.txt": validation,
+        "test_event_ids.txt": list(ACTIVE_FIRE_TEST_IDS),
+    }
     if set(training) & set(validation) or set(training) & set(ACTIVE_FIRE_TEST_IDS):
         raise ValueError("The pinned event partition is not disjoint.")
     if args.check:
+        assert_existing_manifests(expected)
         print(f"Validated {len(training)} train, {len(validation)} validation, {len(ACTIVE_FIRE_TEST_IDS)} test events.")
         return
 
     SPLIT_DIR.mkdir(exist_ok=True)
-    write_manifest(SPLIT_DIR / "train_event_ids.txt", training, "training")
-    write_manifest(SPLIT_DIR / "validation_event_ids.txt", validation, "validation")
-    write_manifest(SPLIT_DIR / "test_event_ids.txt", list(ACTIVE_FIRE_TEST_IDS), "test")
+    write_manifest(SPLIT_DIR / "train_event_ids.txt", expected["train_event_ids.txt"], "training")
+    write_manifest(SPLIT_DIR / "validation_event_ids.txt", expected["validation_event_ids.txt"], "validation")
+    write_manifest(SPLIT_DIR / "test_event_ids.txt", expected["test_event_ids.txt"], "test")
     print(f"Wrote {len(training)} train, {len(validation)} validation, {len(ACTIVE_FIRE_TEST_IDS)} test events to {SPLIT_DIR}.")
 
 

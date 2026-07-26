@@ -33,12 +33,12 @@ loss:
   gamma: 3.0
   selection_grid:
     - {alpha: 0.5, beta: 0.5}
-    - {alpha: 0.4, beta: 0.6}
-    - {alpha: 0.3, beta: 0.7}
+    - {alpha: 0.45, beta: 0.55}
+    - {alpha: 0.55, beta: 0.45}
 selection_policy: choose alpha/beta on validation; select F1 only across thresholds [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65], then freeze before test
 training:
   batch_size: 1
-  learning_rate: 0.0002
+  learning_rate: 0.0001
   num_heads: 4
   sequence_length: 10
   interval: 3
@@ -49,6 +49,11 @@ training:
   validation_thresholds: [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65]
   grad_clip: 1.0
   scheduler: cosine_restart_decay
+  scheduler_step_unit: epoch
+  scheduler_t0_epochs: 10
+  scheduler_t_mult: 1
+  scheduler_decay_factor: 0.99
+  scheduler_eta_min: 0.0000001
   wandb:
     mode: online
     project: swinfire_jei_resubmission_v2

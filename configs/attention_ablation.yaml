@@ -1,8 +1,8 @@
 experiment:
-  name: attention_ablation_corrected_loss
+  name: attention_ablation_corrected_protocol
   task: active_fire
   seeds: [41, 42, 43, 44, 45]
-  output_root: results/training_runs/attention_ablation_corrected_loss
+  output_root: results/training_runs/attention_ablation_corrected_protocol
 controlled_parameters:
   model: swin_convlstm
   input_channels: 8
@@ -14,7 +14,6 @@ controlled_parameters:
 variants:
   - {attention: none}
   - {attention: se}
-  - {attention: cbam}
   - {attention: dcbam}
 statistics:
   unit_of_repetition: independent seed

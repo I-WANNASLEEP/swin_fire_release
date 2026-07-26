@@ -22,12 +22,12 @@ variants:
   model_c_without_restart_schedule:
     pretraining: cross_modal_rgb_mean_extension
     copy_paste: disabled
-    scheduler: step
+    scheduler: constant
     loss: {name: masked_hybrid, alpha: 0.5, beta: 0.5, gamma: 3.0}
   model_d_ce_only:
     pretraining: cross_modal_rgb_mean_extension
     copy_paste: disabled
-    scheduler: step
+    scheduler: constant
     loss: {name: masked_cross_entropy}
 notes:
   - Historical Model A/B/C and loss-ablation values are invalid because they used the old Hybrid Loss.
