@@ -233,10 +233,10 @@ def main() -> None:
     parser.add_argument(
         "--fn-color",
         choices=("green", "blue"),
-        default="green",
+        default="blue",
         help=(
-            "Use green to follow the requested manuscript convention, or blue "
-            "to reproduce the supplied reference figure exactly."
+            "Use blue for the current TP/FP/FN convention; green remains "
+            "available only for legacy figure reproduction."
         ),
     )
     parser.add_argument("--output-dir", type=Path, default=None)

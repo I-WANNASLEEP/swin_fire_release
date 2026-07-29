@@ -153,7 +153,7 @@ def render_window_pngs(
         channel_index,
         detection_dir,
         detection_records,
-        "green",
+        "blue",
         write_gif=False,
     )
     render_attention(

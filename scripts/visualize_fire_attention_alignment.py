@@ -164,7 +164,7 @@ def render_pages(
                 probabilities[frame_index],
                 raw_label[frame_index],
                 threshold,
-                fn_color="green",
+                fn_color="blue",
             )
             attention_overlay = blend_attention(
                 image[channel_index, frame_index],
@@ -264,7 +264,7 @@ def render_gif(
             probabilities[frame_index],
             raw_label[frame_index],
             threshold,
-            fn_color="green",
+            fn_color="blue",
         )
         attention_overlay = blend_attention(
             image[channel_index, frame_index],

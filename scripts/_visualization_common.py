@@ -423,7 +423,7 @@ def confusion_overlay(
     raw_label: np.ndarray,
     threshold: float,
     *,
-    fn_color: str = "green",
+    fn_color: str = "blue",
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     if fn_color not in {"green", "blue"}:
         raise ValueError("fn_color must be either 'green' or 'blue'.")
