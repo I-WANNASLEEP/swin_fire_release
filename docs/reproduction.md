@@ -5,17 +5,18 @@ resubmission paper.
 
 ## Prerequisites
 
-1. Conda environment: `ts-satfire-fixed` (Python 3.12.2, PyTorch 2.3.1+cu121)
+1. Existing Conda environment: `ts-satfire`
    ```bash
-   PYTHON=/home/congwei/miniconda3/envs/ts-satfire-fixed/bin/python
+   conda activate ts-satfire
+   PYTHON=python
    ```
 
 2. TS-SatFire dataset downloaded from Kaggle:
    https://www.kaggle.com/datasets/z789456sx/ts-satfire
 
-3. Preprocessed NPY arrays at a known `DATA_ROOT` path, with structure:
+3. Preprocessed NPY arrays under `TS_SATFIRE_DATA_ROOT`, with structure:
    ```
-   DATA_ROOT/
+   TS_SATFIRE_DATA_ROOT/
    ├── dataset_train/
    │   ├── af_train_img_seqtoseq_alll_10i_3.npy
    │   └── af_train_label_seqtoseq_alll_10i_3.npy
@@ -33,9 +34,10 @@ resubmission paper.
 ## Environment Setup
 
 ```bash
-export PYTHON=/home/congwei/miniconda3/envs/ts-satfire-fixed/bin/python
-export DATA_ROOT="/path/to/preprocessed_active_fire_arrays"
-export PRETRAINED_PATH="/path/to/swin_tiny_patch4_window7_224.pth"
+conda activate ts-satfire
+export PYTHON=python
+export TS_SATFIRE_DATA_ROOT="/path/to/preprocessed_active_fire_arrays"
+export SWIN_PRETRAINED_PATH="/path/to/swin_tiny_patch4_window7_224.pth"
 export SAMPLE_MANIFEST="/path/to/generated_sample_manifest.csv"
 ```
 
@@ -72,7 +74,7 @@ Execute each experiment independently. The scripts handle all seeds.
 bash scripts/run_full_model.sh
 ```
 
-### Attention Ablation (none, SE, CBAM, DCBAM; 5 seeds each)
+### Attention Ablation (none, SE, DCBAM; 5 seeds each)
 ```bash
 bash scripts/run_attention_ablation.sh
 ```

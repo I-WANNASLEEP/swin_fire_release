@@ -1,15 +1,9 @@
 # Reproducible TS-SatFire SwinConvLSTM for JEI resubmission
 
 This repository contains the corrected training, evaluation, and evidence
-pipeline for 8-channel, 10-frame active-fire segmentation. The goal is not to
-preserve a historical score; it is to make every manuscript number traceable to
-one locked data split, one source revision, one independent seed, one raw metric
-record, and one W&B run.
-
-No result produced with the former Hybrid Loss is a final result. The historical
-checkpoint with validation F1 around 0.82 remains useful for qualitative
-debugging, but it lacks the immutable data and multi-seed provenance required
-for the revised paper.
+pipeline for 8-channel, 10-frame active-fire segmentation. It connects each
+experiment to one locked data split, one source revision, one independent seed,
+one raw metric record, and one W&B run.
 
 ## Method implemented by the code
 
@@ -53,15 +47,9 @@ validation, CPU, CUDA, and AMP.
 ## Locked data and selection protocol
 
 This project locks 125 training events, 13 validation events, and **24 held-out
-test units**. At the user's direction, the 24 `US_2021_*` NPY pairs supplied in
-`dataset_test/` are authoritative and match `splits/test_event_ids.txt` exactly
-after removing `af_`.
-
-This is an explicit project-level test definition: the pinned upstream generator
-uses 17 named-fire labels, whereas the revised study reports the 24 supplied
-`US_2021_*` units. The manuscript must state that distinction instead of calling
-the lists identical. Each supplied identifier is the unit for per-event metrics
-and event-level Bootstrap. Do not reintroduce directory-order selection or a
+test events**. The fixed event identifiers are stored in
+`splits/train_event_ids.txt`, `splits/validation_event_ids.txt`, and
+`splits/test_event_ids.txt`. Do not select events by directory order or use a
 first-ten subset.
 
 - Training: parameter optimization only.
@@ -75,11 +63,6 @@ first-ten subset.
 - Repetitions are independent seeds, never epochs.
 - Report `mean ± sample standard deviation` across seeds.
 - Bootstrap confidence intervals over held-out fire events, never epochs.
-
-The provided per-event test arrays are finite and structurally valid, but they
-do not contain a window-level timestamp manifest. Until event/window timestamps
-and file hashes are frozen, frame numbers 1–10 are sequence indices rather than
-verified acquisition timestamps.
 
 ## Environment
 
@@ -231,11 +214,10 @@ the requested color convention:
 
 - TP: bright green
 - FP: red
-- FN: dark green with a bright-green outline
+- FN: blue
 
-The two green classes remain distinguishable in the legend and by the FN
-outline. Use `--fn-color blue` only when an exact reproduction of the older
-TP-green/FP-red/FN-blue reference figure is required; green is the default.
+Blue is the default FN color. The optional `--fn-color green` argument is
+retained only for reproducing legacy figures.
 
 ```bash
 "$PYTHON" scripts/visualize_test_sequence.py \
@@ -244,7 +226,7 @@ TP-green/FP-red/FN-blue reference figure is required; green is the default.
   --event-id US_2021_AZ3345510938920210616 \
   --window-index 0 \
   --display-channel I4_day \
-  --fn-color green
+  --fn-color blue
 ```
 
 The output directory contains:
@@ -325,24 +307,18 @@ load the checkpoint only once and use the resumable PNG-only batch exporter:
   --output-root results/all_test_visualizations
 ```
 
-The current test folder contains 237 ten-frame windows, so a complete CPU run
-can take hours. The output root is one flat directory containing exactly seven
-PNG files per window (1,659 PNG files for all 237 windows): three fire-monitoring
-figures, one ten-frame attention figure, two aligned comparison figures, and one
-overlap-metric figure. It contains no subdirectories, GIF, NPZ, NPY, JSON, or
-CSV files. If interrupted, rerun the same command with `--resume`. For a
-one-window-per-event smoke test, add `--max-windows-per-event 1`. To regenerate
-only a specific window, add, for example:
+The output root is one flat directory containing exactly seven PNG files per
+window: three fire-monitoring figures, one ten-frame attention figure, two
+aligned comparison figures, and one overlap-metric figure. It contains no
+subdirectories, GIF, NPZ, NPY, JSON, or CSV files. If interrupted, rerun the
+same command with `--resume`. For a one-window-per-event smoke test, add
+`--max-windows-per-event 1`. To regenerate only a specific window, add, for
+example:
 
 ```bash
   --event-id US_2021_ID4558511544420210705 \
   --window-index 1
 ```
-
-Historical checkpoints may be used to verify visualization compatibility and
-to produce clearly labeled qualitative examples. They must not be reported as
-post-fix paper results unless they were trained under the locked split, loss,
-scheduler, threshold-selection, and provenance protocol.
 
 ## W&B and reproducible analysis
 
@@ -387,10 +363,10 @@ On macOS:
 
 ```bash
 "$PYTHON" -m unittest \
+  datasets.test_label_diagnostics \
   losses.test_masked_hybrid_loss \
-  test_scheduler_protocol \
-  test_visualization_protocol \
   test_initialization_protocol \
+  test_training_protocol \
   test_3d_baselines -v
 bash -n scripts/run_progressive_ablation.sh
 bash -n scripts/run_attention_ablation.sh
@@ -403,9 +379,6 @@ conda activate swin
 python -m unittest losses.test_masked_hybrid_loss test_3d_baselines -v
 ```
 
-For the complete evidence chain, see
-[`docs/reproduction.md`](docs/reproduction.md),
-[`docs/dataset_versions.md`](docs/dataset_versions.md),
-[`docs/airborne_metadata.md`](docs/airborne_metadata.md),
-[`docs/retraining_manifest.md`](docs/retraining_manifest.md), and
-[`docs/manuscript_revision_outline.md`](docs/manuscript_revision_outline.md).
+For the complete workflow, see
+[`docs/reproduction.md`](docs/reproduction.md) and
+[`docs/dataset_versions.md`](docs/dataset_versions.md).

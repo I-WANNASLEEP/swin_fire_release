@@ -12,9 +12,8 @@
 
 ## Preprocessing
 
-All upstream preprocessing procedures are used without modification. The
-official event-level training (125 events), validation (13 events), and test
-(17 events) partition released with TS-SatFire is followed exactly.
+This repository uses fixed event-level partitions containing 125 training
+events, 13 validation events, and 24 test events.
 
 No data is redistributed in this repository. Before training, you must:
 
@@ -43,11 +42,11 @@ training partition. See `metadata/normalization_statistics.json`.
 
 ## Event Partition
 
-| Split      | Events | Source                      |
-|------------|--------|-----------------------------|
-| Training   | 125    | ROI CSVs 2017-2020 minus val|
-| Validation | 13     | Fixed upstream list         |
-| Test       | 17     | Named active-fire events    |
+| Split      | Events |
+|------------|-------:|
+| Training   |    125 |
+| Validation |     13 |
+| Test       |     24 |
 
 See `splits/train_event_ids.txt`, `splits/validation_event_ids.txt`,
 `splits/test_event_ids.txt`.
