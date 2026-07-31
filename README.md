@@ -64,6 +64,13 @@ first-ten subset.
 - Report `mean ± sample standard deviation` across seeds.
 - Bootstrap confidence intervals over held-out fire events, never epochs.
 
+The current `dataset_test/` delivery contains 48 NPY files forming 24 complete
+image/label pairs and 237 ten-frame windows. A full local scan found finite
+`float32` arrays with image shape `[N,8,10,256,256]`, label shape
+`[N,3,10,256,256]`, and active-fire values equal to zero or positive radiometric
+values rather than a strict `0/1` mask. This structural scan does not replace
+the required timestamp/sample manifest or file SHA256 inventory.
+
 ## Environment
 
 Use the existing environment; do not recreate it.
@@ -140,7 +147,8 @@ Run one seed only after that check succeeds:
 ```
 
 The launcher refuses to append to a non-empty seed directory. Paper launchers
-also refuse tracked source changes by default; use a clean committed worktree.
+also refuse staged or unstaged tracked source changes by default; use a clean
+committed worktree.
 
 ## Manuscript-matched ablations
 
@@ -148,10 +156,10 @@ also refuse tracked source changes by default; use a clean committed worktree.
 
 | Variant | Pretraining | DCBAM | Copy-Paste | LR schedule | Loss |
 |---|---:|---:|---:|---|---|
-| Model A | yes | yes | progressive | epoch cosine restarts | corrected Masked Hybrid |
-| Model B | yes | yes | disabled | epoch cosine restarts | corrected Masked Hybrid |
-| Model C | yes | yes | disabled | constant LR | corrected Masked Hybrid |
-| Model D | yes | yes | disabled | constant LR | masked Cross-Entropy |
+| Model A | no | yes | progressive | epoch cosine restarts | corrected Masked Hybrid |
+| Model B | no | yes | disabled | epoch cosine restarts | corrected Masked Hybrid |
+| Model C | no | yes | disabled | constant LR | corrected Masked Hybrid |
+| Model D | no | yes | disabled | constant LR | masked Cross-Entropy |
 
 “Remove learning-rate optimization” is implemented literally as constant LR.
 Replacing cosine restarts with StepLR would introduce a new scheduler rather
@@ -172,9 +180,12 @@ bash scripts/run_attention_ablation.sh
 
 Both launchers default to five seeds and 100 epochs, preflight every realized
 run before starting the first GPU job, create a separate output root per
-variant, and refuse an existing experiment root. Environment variables
-`ABLATION_SEEDS` and `PAPER_MAX_EPOCHS` are for explicit smoke tests only; runs
-using them are not automatically paper-admissible.
+variant, refuse an existing experiment root, and include the exact variant
+(`model_a_full`, `model_b_without_copy_paste`, `model_c_without_lr_optimization`,
+`model_d_ce_only`, or `attention_*`) in the run manifest and W&B run name.
+Environment variables `ABLATION_SEEDS` and `PAPER_MAX_EPOCHS` are rejected for a
+paper run unless `SMOKE_TEST_ONLY=1` is set and a separate smoke-test output root
+is supplied.
 
 Other controlled experiments:
 
@@ -200,7 +211,9 @@ pretrained weights loaded. The 8-channel patch embedding, temporal module, and
 segmentation head can yield poorly calibrated logits even when the checkpoint
 load report confirms that pretrained encoder layers were loaded. Pretraining
 must be judged by paired, same-code, same-seed learning curves and final
-validation-selected checkpoints.
+validation-selected checkpoints. Legacy terminal output is not retroactively
+present in W&B; only runs created by the current code can be expected to expose
+the `audit/epoch0/*` fields.
 
 ## Ten-frame test visualization
 
@@ -320,31 +333,13 @@ example:
   --window-index 1
 ```
 
-## W&B and reproducible analysis
 
-Final paper runs must use online W&B project
-[`15145202826-1/swinfire_jei_resubmission_v2`](https://wandb.ai/15145202826-1/swinfire_jei_resubmission_v2).
-Each run also writes:
 
-```text
-resolved_config.json
-run_manifest.json
-startup_provenance.json
-epoch0_validation_audit.json
-epoch_metrics.jsonl
-wandb_run.json
-```
-
-Export a protocol-aware audit of the full project:
-
-```bash
-"$PYTHON" scripts/analyze_wandb_runs.py \
-  --output-dir results/analysis/wandb_YYYY-MM-DD
-```
-
-The export separates runs by source commit, initialization, loss, scheduler,
-planned epochs, checkpoint policy, threshold grid, and actual LR trace. It does
-not combine runs merely because their names end in the same alpha/beta pair.
+The export separates runs by source commit, explicit experiment variant,
+Copy-Paste state, initialization, loss, scheduler, planned epochs, checkpoint
+policy, threshold grid, and actual LR trace. It also exports Epoch-0 audit
+fields when the run actually recorded them. It does not combine runs merely
+because their names end in the same alpha/beta pair.
 
 Generate manuscript tables and curves only from raw records:
 
