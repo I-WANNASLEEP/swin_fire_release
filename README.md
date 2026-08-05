@@ -1,4 +1,4 @@
-# Reproducible TS-SatFire SwinConvLSTM for JEI resubmission
+# Reproducible TS-SatFire SwinConvLSTM
 
 This repository contains the corrected training, evaluation, and evidence
 pipeline for 8-channel, 10-frame active-fire segmentation. It connects each
@@ -114,7 +114,6 @@ The paper configuration in `configs/full_model.yaml` uses:
 batch size                    1
 learning rate                 1e-4
 epochs                        100
-seeds                         41, 42, 43, 44, 45
 gradient clipping             1.0
 cosine restart T_0            10 epochs
 T_mult                        1
